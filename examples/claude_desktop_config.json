@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "windows-control-stdio": {
+      "command": "python",
+      "args": [
+        "E:\\Projects\\windows-mcp\\server.py",
+        "--transport",
+        "stdio"
+      ]
+    },
+    "windows-control-http": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}

@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "windows-control-center-mcp"
+version = "1.0.0"
+description = "A secure, strictly local Windows Control Center Model Context Protocol (MCP) server for Antigravity, AGY CLI, Claude Desktop, and AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "windows",
+    "fastmcp",
+    "ai-agent",
+    "powershell",
+    "security",
+    "automation",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Security",
+]
+dependencies = [
+    "fastmcp>=4.1.0",
+    "psutil>=7.0.0",
+    "pyperclip>=1.8.0",
+    "pillow>=10.0.0",
+    "pywin32>=306",
+    "uvicorn>=0.30.0",
+    "starlette>=0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+windows-mcp = "server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

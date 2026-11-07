@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "windows-control": {
+      "command": "python",
+      "args": [
+        "path/to/windows-mcp/server.py",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "MCP_STRICT_MODE": "true",
+        "MCP_ALLOW_ELEVATION": "true"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "get_system_info",
+        "get_network_info",
+        "list_processes",
+        "get_file_info",
+        "read_file",
+        "list_directory",
+        "search_files"
+      ]
+    }
+  }
+}
