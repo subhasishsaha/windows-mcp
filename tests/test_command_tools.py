@@ -94,7 +94,18 @@ class TestCommandTools(unittest.TestCase):
         self.assertFalse(res["success"])
         self.assertIn("REFUSED", res["message"])
 
-        # 2. Server's own PID
+        # 2. Critical Windows service host
+        res_svc = kill_process(name="svchost.exe")
+        self.assertFalse(res_svc["success"])
+        self.assertIn("REFUSED", res_svc["message"])
+
+        # 3. Kernel process IDs (0 and 4)
+        for kpid in (0, 4):
+            res_k = kill_process(pid=kpid)
+            self.assertFalse(res_k["success"])
+            self.assertIn("REFUSED", res_k["message"])
+
+        # 4. Server's own PID
         my_pid = os.getpid()
         res_pid = kill_process(pid=my_pid)
         self.assertFalse(res_pid["success"])

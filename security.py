@@ -88,6 +88,34 @@ PROTECTED_PROCESS_NAMES = {
     "winlogon.exe",
     "dwm.exe",
     "fontdrvhost.exe",
+    "svchost.exe",
+    "sihost.exe",
+    "explorer.exe",
+}
+
+RESERVED_DEVICE_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
 }
 
 # ---------------------------------------------------------------------------
@@ -282,8 +310,42 @@ def audit_log(event: str, command: str, allowed: bool, reason: str = "", elevate
 # ---------------------------------------------------------------------------
 # Validation Functions
 # ---------------------------------------------------------------------------
+def _normalize_windows_path(path: str) -> str:
+    """Normalize Windows paths, removing extended prefixes (\\?\\, \\.\\) and resolving UNC admin shares."""
+    if not path:
+        return ""
+    norm = path.strip().strip("\"'").replace("/", "\\")
+    # Extended UNC prefix: \\?\UNC\server\share
+    if norm.lower().startswith("\\\\?\\unc\\"):
+        norm = "\\\\" + norm[8:]
+    # Extended or device prefix: \\?\ or \\.\
+    elif norm.lower().startswith(("\\\\?\\", "\\\\.\\")):
+        norm = norm[4:]
+    # Localhost UNC admin shares: \\localhost\c$\..., \\127.0.0.1\c$\..., \\::1\c$\...
+    unc_match = re.match(
+        r"^\\\\(?:localhost|127\.0\.0\.1|::1|[a-zA-Z0-9_\-]+)\\([a-zA-Z])(?:\$|\\|\b)(.*)$",
+        norm,
+        re.IGNORECASE,
+    )
+    if unc_match:
+        drive_letter = unc_match.group(1).upper()
+        rest = unc_match.group(2).lstrip("\\")
+        norm = f"{drive_letter}:\\{rest}" if rest else f"{drive_letter}:\\"
+    return norm
+
+
+_POWERSHELL_ENC_PATTERN = re.compile(
+    r"(?:[-/](?:e|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand))\s*(?:[:=]|\s)\s*['\"]?([A-Za-z0-9+/= \r\n]{4,})['\"]?",
+    re.IGNORECASE,
+)
+_FROM_BASE64_PATTERN = re.compile(
+    r"(?:\[(?:System\.)?Convert\]::FromBase64String|frombase64string)\s*\(\s*['\"]([A-Za-z0-9+/= \r\n]{4,})['\"]\s*\)",
+    re.IGNORECASE,
+)
+
+
 def _check_encoded_command(command: str) -> Tuple[bool, Optional[str]]:
-    """Inspect and decode Base64-encoded PowerShell commands (-EncodedCommand / -enc).
+    """Inspect and decode Base64-encoded PowerShell commands and FromBase64String calls.
 
     Args:
         command: Command string that might contain encoded PowerShell payload.
@@ -291,28 +353,43 @@ def _check_encoded_command(command: str) -> Tuple[bool, Optional[str]]:
     Returns:
         (is_safe, error_reason)
     """
-    match = re.search(r"-(?:e|enc|encodedcommand)\s+([A-Za-z0-9+/=]+)", command, re.IGNORECASE)
-    if not match:
+    b64_matches = []
+    for m in _POWERSHELL_ENC_PATTERN.finditer(command):
+        b64_matches.append(m.group(1).replace(" ", "").replace("\r", "").replace("\n", ""))
+    for m in _FROM_BASE64_PATTERN.finditer(command):
+        b64_matches.append(m.group(1).replace(" ", "").replace("\r", "").replace("\n", ""))
+
+    if not b64_matches:
         return True, None
 
-    b64_str = match.group(1)
-    try:
-        # PowerShell EncodedCommand is UTF-16LE Base64
-        decoded_bytes = base64.b64decode(b64_str, validate=True)
-        if len(decoded_bytes) < 2 or len(decoded_bytes) % 2 != 0:
+    for b64_str in b64_matches:
+        decoded_cmd = ""
+        try:
+            decoded_bytes = base64.b64decode(b64_str, validate=True)
+            # Try UTF-16LE first (PowerShell EncodedCommand standard)
+            if len(decoded_bytes) >= 2 and len(decoded_bytes) % 2 == 0:
+                try:
+                    decoded_cmd = decoded_bytes.decode("utf-16le").strip()
+                except UnicodeDecodeError:
+                    pass
+            # Fallback to UTF-8
+            if not decoded_cmd:
+                try:
+                    decoded_cmd = decoded_bytes.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    pass
+            # Fallback to Latin-1
+            if not decoded_cmd:
+                decoded_cmd = decoded_bytes.decode("latin-1", errors="ignore").strip()
+        except Exception as e:
             if STRICT_MODE:
-                return False, "SECURITY POLICY VIOLATION: Invalid or malformed UTF-16LE encoded command."
-        decoded_cmd = decoded_bytes.decode("utf-16le").strip()
-    except Exception as e:
-        if STRICT_MODE:
-            return False, f"SECURITY POLICY VIOLATION: Invalid base64 encoded command detected: {str(e)}"
-        return True, None
+                return False, f"SECURITY POLICY VIOLATION: Malformed base64 encoded command detected: {str(e)}"
+            continue
 
-    if decoded_cmd:
-        # Recursively validate decoded payload
-        is_safe, reason = validate_command(decoded_cmd, _is_subcheck=True)
-        if not is_safe:
-            return False, f"SECURITY POLICY VIOLATION (Obfuscated Payload): {reason}"
+        if decoded_cmd:
+            is_safe, reason = validate_command(decoded_cmd, _is_subcheck=True)
+            if not is_safe:
+                return False, f"SECURITY POLICY VIOLATION (Obfuscated Payload): {reason}"
 
     return True, None
 
@@ -351,9 +428,9 @@ def validate_command(command: str, _is_subcheck: bool = False) -> Tuple[bool, Op
 
 
 def validate_path_safety(path: str, operation: str = "delete") -> Tuple[bool, Optional[str]]:
-    """Validate that a target file/directory path is not a critical system path or drive root.
+    """Validate that a target file/directory path is not a critical system path, drive root, or device.
 
-    Resolves both absolute and real (canonical symlink/junction) paths to prevent traversal.
+    Resolves normalized, absolute, and real (canonical symlink/junction) paths to prevent traversal.
 
     Args:
         path: Path string to check.
@@ -365,24 +442,40 @@ def validate_path_safety(path: str, operation: str = "delete") -> Tuple[bool, Op
     if not path or not path.strip():
         return False, "SECURITY POLICY VIOLATION: Path cannot be empty."
 
+    clean_raw = path.strip().strip("\"'")
+    normalized = _normalize_windows_path(clean_raw)
+
+    # 1. Check for reserved DOS device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    for check_str in (clean_raw, normalized):
+        base_name = os.path.basename(check_str).lower().split(".")[0]
+        if base_name in RESERVED_DEVICE_NAMES:
+            reason = f"Access to Windows reserved device '{check_str}' is prohibited."
+            audit_log("PATH_BLOCKED", path, allowed=False, reason=reason)
+            return False, f"SECURITY POLICY VIOLATION: {reason}"
+
     try:
-        clean_path = path.strip().strip("\"'")
-        abs_path = os.path.abspath(clean_path).lower().rstrip("\\/")
-        real_path = os.path.realpath(clean_path).lower().rstrip("\\/")
+        abs_raw = os.path.abspath(clean_raw).lower().rstrip("\\/")
+        abs_norm = os.path.abspath(normalized).lower().rstrip("\\/")
+        real_norm = os.path.realpath(normalized).lower().rstrip("\\/")
     except Exception as e:
         return False, f"Invalid path resolution: {str(e)}"
 
-    paths_to_check = {abs_path, real_path}
+    paths_to_check = {abs_raw, abs_norm, real_norm}
+    # Also normalize resolved paths to strip any extended prefixes
+    for p in list(paths_to_check):
+        p_norm = _normalize_windows_path(p).lower().rstrip("\\/")
+        if p_norm:
+            paths_to_check.add(p_norm)
 
     for p in paths_to_check:
-        # 1. Check drive roots (e.g. C:, C:\, D:\)
+        # 2. Check drive roots (e.g. C:, C:\, D:\)
         drive, tail = os.path.splitdrive(p)
         if drive and tail in ("", "\\", "/"):
             reason = f"Destructive operation '{operation}' is prohibited on drive root: {path}"
             audit_log("PATH_BLOCKED", path, allowed=False, reason=reason)
             return False, f"SECURITY POLICY VIOLATION: {reason}"
 
-        # 2. Check critical system directories and subdirectories
+        # 3. Check critical system directories and subdirectories
         for crit in CRITICAL_PATHS:
             if not crit:
                 continue
@@ -391,7 +484,7 @@ def validate_path_safety(path: str, operation: str = "delete") -> Tuple[bool, Op
                 audit_log("PATH_BLOCKED", path, allowed=False, reason=reason)
                 return False, f"SECURITY POLICY VIOLATION: {reason}"
 
-        # 3. Check User AppData Windows system state
+        # 4. Check User AppData Windows system state
         user_appdata = os.environ.get("LOCALAPPDATA", "")
         if user_appdata:
             protected_appdata = os.path.abspath(os.path.join(user_appdata, "Microsoft", "Windows")).lower().rstrip("\\/")
@@ -401,6 +494,36 @@ def validate_path_safety(path: str, operation: str = "delete") -> Tuple[bool, Op
                 return False, f"SECURITY POLICY VIOLATION: {reason}"
 
     return True, None
+
+
+def _resolve_ast_str(node: ast.AST, scope: Dict[str, str]) -> Optional[str]:
+    """Helper to statically resolve constant strings, binary concatenations, and variable references."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _resolve_ast_str(node.left, scope)
+        right = _resolve_ast_str(node.right, scope)
+        if left is not None and right is not None:
+            return left + right
+    if isinstance(node, ast.Name):
+        return scope.get(node.id)
+    if isinstance(node, (ast.List, ast.Tuple)):
+        parts = [_resolve_ast_str(elt, scope) for elt in node.elts]
+        if all(p is not None for p in parts):
+            return " ".join(parts)
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for val in node.values:
+            if isinstance(val, ast.Constant):
+                parts.append(str(val.value))
+            elif isinstance(val, ast.FormattedValue):
+                res = _resolve_ast_str(val.value, scope)
+                if res is not None:
+                    parts.append(res)
+                else:
+                    return None
+        return "".join(parts)
+    return None
 
 
 def validate_python_code(code: str) -> Tuple[bool, Optional[str]]:
@@ -428,6 +551,16 @@ def validate_python_code(code: str) -> Tuple[bool, Optional[str]]:
         # Normal execution will catch and report Python syntax errors
         return True, None
 
+    # Build local variable scope mapping for string assignments
+    scope_vars: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            val_str = _resolve_ast_str(node.value, scope_vars)
+            if val_str is not None:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        scope_vars[target.id] = val_str
+
     # Inspect AST Nodes
     for node in ast.walk(tree):
         # 1. Inspect function calls
@@ -440,47 +573,61 @@ def validate_python_code(code: str) -> Tuple[bool, Optional[str]]:
 
             # Check shell execution functions: os.system, subprocess.run/call/Popen, etc.
             if func_name in ("system", "popen", "spawnl", "spawnv", "run", "call", "check_call", "check_output", "Popen"):
-                if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                    cmd_str = node.args[0].value
-                    is_safe, reason = validate_command(cmd_str, _is_subcheck=True)
-                    if not is_safe:
-                        audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason or "")
+                if node.args:
+                    cmd_str = _resolve_ast_str(node.args[0], scope_vars)
+                    if cmd_str is not None:
+                        is_safe, reason = validate_command(cmd_str, _is_subcheck=True)
+                        if not is_safe:
+                            audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason or "")
+                            return False, f"SECURITY POLICY VIOLATION (Python Shell Call): {reason}"
+                    elif STRICT_MODE:
+                        reason = "Dynamic or unresolvable shell command execution is prohibited in STRICT_MODE."
+                        audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason)
                         return False, f"SECURITY POLICY VIOLATION (Python Shell Call): {reason}"
 
-            # Check destructive filesystem calls: shutil.rmtree, os.remove, os.unlink, os.rmdir
-            if func_name in ("rmtree", "remove", "unlink", "rmdir"):
-                if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                    target_path = node.args[0].value
-                    is_safe, reason = validate_path_safety(target_path, operation="delete")
-                    if not is_safe:
-                        audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason or "")
+            # Check destructive filesystem calls: shutil.rmtree, os.remove, os.unlink, os.rmdir, os.removedirs
+            if func_name in ("rmtree", "remove", "unlink", "rmdir", "removedirs"):
+                if node.args:
+                    target_path = _resolve_ast_str(node.args[0], scope_vars)
+                    if target_path is not None:
+                        is_safe, reason = validate_path_safety(target_path, operation="delete")
+                        if not is_safe:
+                            audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason or "")
+                            return False, f"SECURITY POLICY VIOLATION (Python Path Deletion): {reason}"
+                    elif STRICT_MODE:
+                        reason = "Dynamic or unresolvable destructive path operation is prohibited in STRICT_MODE."
+                        audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason)
                         return False, f"SECURITY POLICY VIOLATION (Python Path Deletion): {reason}"
 
             # Check file write/overwrite via open()
             if func_name == "open" and len(node.args) >= 2:
-                path_arg = node.args[0]
-                mode_arg = node.args[1]
-                if (
-                    isinstance(path_arg, ast.Constant)
-                    and isinstance(path_arg.value, str)
-                    and isinstance(mode_arg, ast.Constant)
-                    and isinstance(mode_arg.value, str)
-                ):
-                    if any(m in mode_arg.value for m in ("w", "a", "+")):
-                        is_safe, reason = validate_path_safety(path_arg.value, operation="write")
+                mode_str = _resolve_ast_str(node.args[1], scope_vars)
+                if mode_str and any(m in mode_str for m in ("w", "a", "+")):
+                    target_path = _resolve_ast_str(node.args[0], scope_vars)
+                    if target_path is not None:
+                        is_safe, reason = validate_path_safety(target_path, operation="write")
                         if not is_safe:
                             audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason or "")
                             return False, f"SECURITY POLICY VIOLATION (Python File Overwrite): {reason}"
+                    elif STRICT_MODE:
+                        reason = "Dynamic or unresolvable file write/overwrite path is prohibited in STRICT_MODE."
+                        audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason)
+                        return False, f"SECURITY POLICY VIOLATION (Python File Overwrite): {reason}"
 
-            # Check dynamic obfuscated execution: eval/exec with base64
+            # Check dynamic execution: exec/eval
             if func_name in ("exec", "eval"):
-                for arg in node.args:
-                    if isinstance(arg, ast.Call):
-                        inner_func = getattr(arg.func, "attr", "") or getattr(arg.func, "id", "")
-                        if "b64decode" in inner_func or "decode" in inner_func:
-                            reason = "Obfuscated dynamic execution (exec/eval of base64 decoded string) is blocked."
-                            audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason)
-                            return False, f"SECURITY POLICY VIOLATION (Python Code): {reason}"
+                if node.args:
+                    inner_code = _resolve_ast_str(node.args[0], scope_vars)
+                    if inner_code is not None:
+                        # Recursively validate static code passed to exec/eval
+                        is_safe, reason = validate_python_code(inner_code)
+                        if not is_safe:
+                            audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason or "")
+                            return False, reason
+                    elif STRICT_MODE:
+                        reason = "Dynamic exec/eval with unresolvable or decoded payload is prohibited in STRICT_MODE."
+                        audit_log("PYTHON_BLOCKED", code[:100], allowed=False, reason=reason)
+                        return False, f"SECURITY POLICY VIOLATION (Python Code): {reason}"
 
     audit_log("PYTHON_ALLOWED", code[:100], allowed=True)
     return True, None

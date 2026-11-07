@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional
 from fastmcp import FastMCP
@@ -527,9 +528,36 @@ def _is_safe_origin(origin: str) -> bool:
     origin_lower = origin.strip().lower()
     if origin_lower == "null":
         return True  # Local file / Electron
-    if origin_lower.startswith(("http://127.0.0.1:", "http://localhost:")):
+    # Allow http or https on localhost, 127.0.0.1, or [::1], with or without explicit port
+    if re.match(r"^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$", origin_lower):
         return True
-    if origin_lower.startswith(("vscode-", "cursor-")):
+    if origin_lower.startswith(("vscode-", "cursor-", "vscode-webview://")):
+        return True
+    return False
+
+
+def _is_safe_host(host_header: str, allowed_host: str = "127.0.0.1", allow_remote: bool = False) -> bool:
+    """Validate that the Host header is a safe loopback host or allowed interface.
+
+    Prevents DNS rebinding attacks where an external domain resolves to 127.0.0.1.
+    """
+    if not host_header:
+        return True
+    clean_host = host_header.strip().lower()
+    # Handle IPv6 bracket format [::1] or [::1]:8000
+    if clean_host.startswith("["):
+        bracket_end = clean_host.find("]")
+        if bracket_end != -1:
+            clean_host = clean_host[1:bracket_end]
+        else:
+            clean_host = clean_host.lstrip("[")
+    elif ":" in clean_host and clean_host.count(":") == 1:
+        # Standard host:port (IPv4 or hostname)
+        clean_host = clean_host.split(":")[0]
+
+    if clean_host in ("127.0.0.1", "localhost", "::1", "testserver") or clean_host.startswith("127."):
+        return True
+    if allow_remote or clean_host == allowed_host.strip().lower().split(":")[0]:
         return True
     return False
 
@@ -601,6 +629,14 @@ def main() -> None:
 
         class LocalCorsMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
+                host = request.headers.get("host", "")
+                if host and not _is_safe_host(host, args.host, args.allow_remote_access):
+                    logger.warning("BLOCKED untrusted Host header: %s", host)
+                    return Response(
+                        status_code=403,
+                        content="Host header validation failed (DNS rebinding protection).",
+                    )
+
                 origin = request.headers.get("origin", "")
                 if origin and not _is_safe_origin(origin):
                     logger.warning("BLOCKED untrusted cross-origin request from: %s", origin)

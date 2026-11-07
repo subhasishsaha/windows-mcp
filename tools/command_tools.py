@@ -352,6 +352,13 @@ def kill_process(
 
     # 1. Kill by PID
     if pid is not None:
+        if pid in (0, 4):
+            return {
+                "success": False,
+                "message": f"REFUSED: Termination of core Windows kernel process (PID {pid}) is prohibited.",
+                "killed_processes": [],
+                "errors": ["Target process is protected."],
+            }
         if pid in (my_pid, parent_pid):
             return {
                 "success": False,

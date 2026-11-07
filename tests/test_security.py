@@ -179,6 +179,28 @@ class TestSecurityGuardrails(unittest.TestCase):
         is_safe, reason = validate_command(benign_encoded)
         self.assertTrue(is_safe, f"Benign encoded command was falsely blocked: '{benign_encoded}'")
 
+    def test_powershell_encoded_command_variants_blocked(self):
+        """Ensure all PowerShell encoded parameter variations and FromBase64String calls are intercepted."""
+        cmd = "format c:"
+        b64_utf16 = base64.b64encode(cmd.encode("utf-16le")).decode("ascii")
+        b64_utf8 = base64.b64encode(cmd.encode("utf-8")).decode("ascii")
+
+        variants = [
+            f'powershell -enc "{b64_utf16}"',
+            f"powershell -enc:'{b64_utf16}'",
+            f"powershell -enc={b64_utf16}",
+            f"powershell /enc {b64_utf16}",
+            f"powershell -encoded {b64_utf16}",
+            f"powershell -e {b64_utf16}",
+            f"powershell /encodedcommand:\"{b64_utf16}\"",
+            f"[System.Convert]::FromBase64String('{b64_utf8}')",
+            f"[Convert]::FromBase64String('{b64_utf8}')",
+        ]
+        for v in variants:
+            is_safe, reason = validate_command(v)
+            self.assertFalse(is_safe, f"Encoded command variant was not blocked: '{v}'")
+            self.assertIn("Obfuscated Payload", reason)
+
 
 class TestPathSafety(unittest.TestCase):
     """Test suite verifying protected system directories and drive roots."""
@@ -209,6 +231,34 @@ class TestPathSafety(unittest.TestCase):
             is_safe, reason = validate_path_safety(p, operation="delete")
             self.assertFalse(is_safe, f"Protected path was not blocked: '{p}'")
             self.assertIn("prohibited in protected system path", reason)
+
+    def test_extended_and_unc_paths_blocked(self):
+        """Ensure Windows extended prefixes (\\\\?\\, \\\\.\\) and UNC admin shares are blocked."""
+        bypass_attempts = [
+            r"\\?\C:\Windows",
+            r"\\?\C:\Windows\System32",
+            r"\\?\C:\Program Files",
+            r"\\.\C:\Windows",
+            r"\\localhost\c$\Windows",
+            r"\\127.0.0.1\c$\Windows\System32",
+            r"\\?\UNC\localhost\c$\Windows",
+            "\\\\?\\C:\\",
+            "\\\\.\\C:\\",
+        ]
+        for p in bypass_attempts:
+            is_safe, reason = validate_path_safety(p, operation="delete")
+            self.assertFalse(is_safe, f"Extended/UNC bypass path was not blocked: '{p}'")
+
+    def test_reserved_dos_devices_blocked(self):
+        """Ensure Windows reserved DOS devices (CON, PRN, AUX, NUL, COM1-9) are blocked."""
+        devices = ["CON", "PRN", "AUX", "NUL", "COM1", "COM3", "LPT1", "con.txt", r"\\.\CON", r"\\.\NUL"]
+        for dev in devices:
+            is_safe, reason = validate_path_safety(dev, operation="delete")
+            self.assertFalse(is_safe, f"Reserved DOS device was not blocked: '{dev}'")
+            self.assertTrue(
+                "reserved device" in reason.lower() or "drive root" in reason.lower(),
+                f"Unexpected reason for device '{dev}': {reason}",
+            )
 
     def test_safe_paths_allowed(self):
         """Ensure user temp paths and project paths are permitted."""
@@ -269,13 +319,34 @@ class TestPythonASTValidation(unittest.TestCase):
         is_safe, reason = validate_python_code(code)
         self.assertFalse(is_safe, f"Obfuscated exec(base64) was not blocked: '{code}'")
 
+    def test_python_concatenation_and_variable_evasions_blocked(self):
+        """Ensure string concatenation, variable tracking, and list args in Python are caught."""
+        evasions = [
+            "import os\npart1 = 'for'\npart2 = 'mat c:'\nos.system(part1 + part2)",
+            "import subprocess\ncmd = ['format', 'c:']\nsubprocess.run(cmd)",
+            "import shutil\np = 'C:\\\\' + 'Windows'\nshutil.rmtree(p)",
+            "exec(\"\"\"import shutil\nshutil.rmtree('C:/Windows')\"\"\")",
+        ]
+        for code in evasions:
+            is_safe, reason = validate_python_code(code)
+            self.assertFalse(is_safe, f"Python evasion snippet was not blocked: '{code}'")
+
 
 class TestProtectedProcesses(unittest.TestCase):
     """Test suite verifying protected critical system process list."""
 
     def test_critical_processes_included(self):
         """Ensure core Windows kernel processes are protected."""
-        critical = ["csrss.exe", "lsass.exe", "services.exe", "smss.exe", "winlogon.exe"]
+        critical = [
+            "csrss.exe",
+            "lsass.exe",
+            "services.exe",
+            "smss.exe",
+            "winlogon.exe",
+            "svchost.exe",
+            "sihost.exe",
+            "explorer.exe",
+        ]
         for proc in critical:
             self.assertIn(proc, PROTECTED_PROCESS_NAMES)
 

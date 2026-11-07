@@ -204,7 +204,7 @@ Path: `%APPDATA%\Claude\claude_desktop_config.json`
     "windows-control": {
       "command": "python",
       "args": [
-        "E:\\Projects\\windows-mcp\\server.py",
+        "C:\\path\\to\\windows-mcp\\server.py",
         "--transport",
         "stdio"
       ]
@@ -223,7 +223,7 @@ In Cline / Roo Code MCP Settings:
     "windows-control": {
       "command": "python",
       "args": [
-        "E:\\Projects\\windows-mcp\\server.py",
+        "C:\\path\\to\\windows-mcp\\server.py",
         "--transport",
         "stdio"
       ],

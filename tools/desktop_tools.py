@@ -57,9 +57,9 @@ def launch_app(
             os.startfile(clean_target)
             return {"success": True, "action": "opened_file_or_app", "target": clean_target}
     except Exception as start_err:
-        # Fallback to direct subprocess spawn without shell=True to prevent injection
+        # Fallback to direct subprocess spawn without shell=True to prevent injection (posix=False for Windows paths)
         try:
-            split_args = shlex.split(clean_args) if clean_args else []
+            split_args = shlex.split(clean_args, posix=False) if clean_args else []
             subprocess.Popen([clean_target] + split_args, shell=False)
             return {"success": True, "action": "spawned_process", "target": clean_target}
         except Exception as spawn_err:
