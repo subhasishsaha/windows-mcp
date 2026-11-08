@@ -37,19 +37,17 @@ def execute_powershell(
     working_dir: Optional[str] = None,
     timeout: int = 120,
     elevate: bool = False,
-    use_sandbox: bool = True,
 ) -> Dict[str, Any]:
     """Execute a PowerShell command on the local Windows machine.
 
     Enforces security guardrails to block dangerous commands, disk destruction, and remote payloads.
-    Optionally isolates execution inside a Windows Job Object sandbox with kernel memory and process quotas.
+    Execution is strictly and immutably isolated inside a Windows Job Object sandbox with kernel memory and process quotas.
 
     Args:
         command: The PowerShell command or script block to run.
         working_dir: Directory where the command should execute (default: current directory).
         timeout: Maximum seconds to wait before terminating (default: 120).
         elevate: Whether to request Windows administrative privilege elevation (default: False).
-        use_sandbox: Whether to isolate execution within a Windows Job Object sandbox (default: True).
 
     Returns:
         A dictionary with stdout, stderr, return_code, execution_time_seconds, timed_out status,
@@ -82,6 +80,18 @@ def execute_powershell(
             "execution_time_seconds": 0.0,
         }
 
+    # Strict enforcement: Job Object sandboxing is mandatory and non-bypassable
+    if not is_job_sandbox_supported():
+        return {
+            "stdout": "",
+            "stderr": "Execution blocked: Windows Job Object sandbox is mandatory and unavailable in this environment.",
+            "return_code": -1,
+            "timed_out": False,
+            "execution_time_seconds": 0.0,
+            "blocked_by_guardrail": True,
+            "sandboxed": False,
+        }
+
     # Use PowerShell with bypass policy and UTF-8 output encoding
     ps_cmd = [
         "powershell.exe",
@@ -94,96 +104,41 @@ def execute_powershell(
     ]
 
     start_time = time.time()
-
-    # Path A: Execute inside Windows Job Object sandbox
-    if use_sandbox and is_job_sandbox_supported():
-        raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
-            ps_cmd,
-            cwd=cwd,
-            timeout=timeout,
-        )
-        exec_time = round(time.time() - start_time, 2)
-        stderr_str = _decode_output(raw_stderr)
-        if timed_out and not stderr_str:
-            stderr_str = f"Command timed out after {timeout} seconds."
-        return {
-            "stdout": _decode_output(raw_stdout),
-            "stderr": stderr_str,
-            "return_code": return_code,
-            "timed_out": timed_out,
-            "execution_time_seconds": exec_time,
-            "sandboxed": True,
-            "sandbox_backend": "windows_job_object",
-            "sandbox_metrics": metrics,
-        }
-
-    # Path B: Standard subprocess fallback if sandboxing disabled or unsupported
-    try:
-        proc = subprocess.Popen(
-            ps_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=cwd,
-        )
-        try:
-            raw_stdout, raw_stderr = proc.communicate(timeout=timeout)
-            exec_time = round(time.time() - start_time, 2)
-            return {
-                "stdout": _decode_output(raw_stdout),
-                "stderr": _decode_output(raw_stderr),
-                "return_code": proc.returncode,
-                "timed_out": False,
-                "execution_time_seconds": exec_time,
-                "sandboxed": False,
-            }
-        except subprocess.TimeoutExpired:
-            # Safely terminate process tree
-            try:
-                parent = psutil.Process(proc.pid)
-                for child in parent.children(recursive=True):
-                    try:
-                        child.kill()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                parent.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-            proc.communicate()
-            return {
-                "stdout": "",
-                "stderr": f"Command timed out after {timeout} seconds.",
-                "return_code": -1,
-                "timed_out": True,
-                "execution_time_seconds": timeout,
-                "sandboxed": False,
-            }
-    except Exception as e:
-        return {
-            "stdout": "",
-            "stderr": f"Execution error: {str(e)}",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": round(time.time() - start_time, 2),
-            "sandboxed": False,
-        }
+    raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
+        ps_cmd,
+        cwd=cwd,
+        timeout=timeout,
+    )
+    exec_time = round(time.time() - start_time, 2)
+    stderr_str = _decode_output(raw_stderr)
+    if timed_out and not stderr_str:
+        stderr_str = f"Command timed out after {timeout} seconds."
+    return {
+        "stdout": _decode_output(raw_stdout),
+        "stderr": stderr_str,
+        "return_code": return_code,
+        "timed_out": timed_out,
+        "execution_time_seconds": exec_time,
+        "sandboxed": True,
+        "sandbox_backend": "windows_job_object",
+        "sandbox_metrics": metrics,
+    }
 
 
 def execute_cmd(
     command: str,
     working_dir: Optional[str] = None,
     timeout: int = 120,
-    use_sandbox: bool = True,
 ) -> Dict[str, Any]:
     """Execute a Command Prompt (cmd.exe) command on Windows.
 
     Enforces security guardrails to block dangerous commands, disk destruction, and remote payloads.
-    Optionally isolates execution inside a Windows Job Object sandbox with kernel memory and process quotas.
+    Execution is strictly and immutably isolated inside a Windows Job Object sandbox with kernel memory and process quotas.
 
     Args:
         command: The cmd.exe command to execute.
         working_dir: Working directory (default: current directory).
         timeout: Maximum seconds to wait before terminating (default: 120).
-        use_sandbox: Whether to isolate execution within a Windows Job Object sandbox (default: True).
 
     Returns:
         A dictionary with stdout, stderr, return_code, execution_time_seconds, timed_out status,
@@ -211,95 +166,53 @@ def execute_cmd(
             "execution_time_seconds": 0.0,
         }
 
-    cmd = ["cmd.exe", "/c", command]
-    start_time = time.time()
-
-    # Path A: Execute inside Windows Job Object sandbox
-    if use_sandbox and is_job_sandbox_supported():
-        raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
-            cmd,
-            cwd=cwd,
-            timeout=timeout,
-        )
-        exec_time = round(time.time() - start_time, 2)
-        stderr_str = _decode_output(raw_stderr)
-        if timed_out and not stderr_str:
-            stderr_str = f"Command timed out after {timeout} seconds."
-        return {
-            "stdout": _decode_output(raw_stdout),
-            "stderr": stderr_str,
-            "return_code": return_code,
-            "timed_out": timed_out,
-            "execution_time_seconds": exec_time,
-            "sandboxed": True,
-            "sandbox_backend": "windows_job_object",
-            "sandbox_metrics": metrics,
-        }
-
-    # Path B: Standard subprocess fallback if sandboxing disabled or unsupported
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=cwd,
-        )
-        try:
-            raw_stdout, raw_stderr = proc.communicate(timeout=timeout)
-            exec_time = round(time.time() - start_time, 2)
-            return {
-                "stdout": _decode_output(raw_stdout),
-                "stderr": _decode_output(raw_stderr),
-                "return_code": proc.returncode,
-                "timed_out": False,
-                "execution_time_seconds": exec_time,
-                "sandboxed": False,
-            }
-        except subprocess.TimeoutExpired:
-            try:
-                parent = psutil.Process(proc.pid)
-                for child in parent.children(recursive=True):
-                    try:
-                        child.kill()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                parent.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-            proc.communicate()
-            return {
-                "stdout": "",
-                "stderr": f"Command timed out after {timeout} seconds.",
-                "return_code": -1,
-                "timed_out": True,
-                "execution_time_seconds": timeout,
-                "sandboxed": False,
-            }
-    except Exception as e:
+    # Strict enforcement: Job Object sandboxing is mandatory and non-bypassable
+    if not is_job_sandbox_supported():
         return {
             "stdout": "",
-            "stderr": f"Execution error: {str(e)}",
+            "stderr": "Execution blocked: Windows Job Object sandbox is mandatory and unavailable in this environment.",
             "return_code": -1,
             "timed_out": False,
-            "execution_time_seconds": round(time.time() - start_time, 2),
+            "execution_time_seconds": 0.0,
+            "blocked_by_guardrail": True,
             "sandboxed": False,
         }
+
+    cmd = ["cmd.exe", "/c", command]
+    start_time = time.time()
+    raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
+        cmd,
+        cwd=cwd,
+        timeout=timeout,
+    )
+    exec_time = round(time.time() - start_time, 2)
+    stderr_str = _decode_output(raw_stderr)
+    if timed_out and not stderr_str:
+        stderr_str = f"Command timed out after {timeout} seconds."
+    return {
+        "stdout": _decode_output(raw_stdout),
+        "stderr": stderr_str,
+        "return_code": return_code,
+        "timed_out": timed_out,
+        "execution_time_seconds": exec_time,
+        "sandboxed": True,
+        "sandbox_backend": "windows_job_object",
+        "sandbox_metrics": metrics,
+    }
 
 
 def execute_python(
     code: str,
     timeout: int = 60,
-    use_sandbox: bool = True,
 ) -> Dict[str, Any]:
     """Execute Python code in the server's virtual environment.
 
     Enforces AST inspection to block dangerous system manipulation and remote payloads.
-    Optionally isolates execution inside a Windows Job Object sandbox with kernel memory and process quotas.
+    Execution is strictly and immutably isolated inside a Windows Job Object sandbox with kernel memory and process quotas.
 
     Args:
         code: Python source code snippet to run.
         timeout: Maximum execution time in seconds (default: 60).
-        use_sandbox: Whether to isolate execution within a Windows Job Object sandbox (default: True).
 
     Returns:
         A dictionary with stdout, stderr, return_code, execution_time_seconds, timed_out status,
@@ -317,66 +230,37 @@ def execute_python(
             "blocked_by_guardrail": True,
         }
 
-    start_time = time.time()
-
-    # Path A: Execute inside Windows Job Object sandbox
-    if use_sandbox and is_job_sandbox_supported():
-        raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
-            [sys.executable, "-c", code],
-            timeout=timeout,
-        )
-        exec_time = round(time.time() - start_time, 2)
-        stderr_str = _decode_output(raw_stderr)
-        if timed_out and not stderr_str:
-            stderr_str = f"Python execution timed out after {timeout} seconds."
-        return {
-            "stdout": _decode_output(raw_stdout),
-            "stderr": stderr_str,
-            "return_code": return_code,
-            "timed_out": timed_out,
-            "execution_time_seconds": exec_time,
-            "sandboxed": True,
-            "sandbox_backend": "windows_job_object",
-            "sandbox_metrics": metrics,
-        }
-
-    # Path B: Standard subprocess fallback if sandboxing disabled or unsupported
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, "-c", code],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        try:
-            raw_stdout, raw_stderr = proc.communicate(timeout=timeout)
-            return {
-                "stdout": _decode_output(raw_stdout),
-                "stderr": _decode_output(raw_stderr),
-                "return_code": proc.returncode,
-                "timed_out": False,
-                "execution_time_seconds": round(time.time() - start_time, 2),
-                "sandboxed": False,
-            }
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return {
-                "stdout": "",
-                "stderr": f"Python execution timed out after {timeout} seconds.",
-                "return_code": -1,
-                "timed_out": True,
-                "execution_time_seconds": timeout,
-                "sandboxed": False,
-            }
-    except Exception as e:
+    # Strict enforcement: Job Object sandboxing is mandatory and non-bypassable
+    if not is_job_sandbox_supported():
         return {
             "stdout": "",
-            "stderr": f"Python execution failed: {str(e)}",
+            "stderr": "Execution blocked: Windows Job Object sandbox is mandatory and unavailable in this environment.",
             "return_code": -1,
             "timed_out": False,
-            "execution_time_seconds": round(time.time() - start_time, 2),
+            "execution_time_seconds": 0.0,
+            "blocked_by_guardrail": True,
             "sandboxed": False,
         }
+
+    start_time = time.time()
+    raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
+        [sys.executable, "-c", code],
+        timeout=timeout,
+    )
+    exec_time = round(time.time() - start_time, 2)
+    stderr_str = _decode_output(raw_stderr)
+    if timed_out and not stderr_str:
+        stderr_str = f"Python execution timed out after {timeout} seconds."
+    return {
+        "stdout": _decode_output(raw_stdout),
+        "stderr": stderr_str,
+        "return_code": return_code,
+        "timed_out": timed_out,
+        "execution_time_seconds": exec_time,
+        "sandboxed": True,
+        "sandbox_backend": "windows_job_object",
+        "sandbox_metrics": metrics,
+    }
 
 
 def list_processes(
@@ -554,7 +438,8 @@ def get_security_status() -> Dict[str, Any]:
         "protected_system_processes": len(security.PROTECTED_PROCESS_NAMES),
         "sandbox_backend": "windows_job_object",
         "sandbox_supported": is_job_sandbox_supported(),
-        "sandbox_enabled_by_default": True,
+        "sandbox_mandatory": True,
+        "sandbox_bypass_allowed": False,
         "sandbox_limits": {
             "max_memory_mb": default_cfg.max_memory_mb,
             "max_job_memory_mb": default_cfg.max_job_memory_mb,

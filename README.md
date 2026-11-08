@@ -95,8 +95,9 @@ Connecting an LLM to native OS execution requires defense-in-depth. Windows Cont
 - Commands requesting administrative privileges trigger standard Windows User Account Control (UAC) prompts (`Start-Process -Verb RunAs`), ensuring physical user awareness.
 - Elevation policy is configurable via `MCP_ALLOW_ELEVATION`.
 
-### 9. Kernel-Enforced Windows Job Object Sandboxing
-- Beyond static command/code analysis, non-elevated command execution (`execute_powershell`, `execute_cmd`, `execute_python`) runs inside an isolated **Win32 Job Object** ([`sandbox.py`](sandbox.py)) by default (`use_sandbox=True`).
+### 9. Kernel-Enforced Windows Job Object Sandboxing (Mandatory & Non-Bypassable)
+- Beyond static command/code analysis, non-elevated command and code execution (`execute_powershell`, `execute_cmd`, `execute_python`) runs inside an isolated **Win32 Job Object** ([`sandbox.py`](sandbox.py)) as the **mandatory and only execution engine**.
+- **Zero AI Bypass**: Sandboxing cannot be disabled, opted out of, or bypassed by AI tool arguments. If the kernel sandbox cannot be initialized, execution fails closed.
 - **Process Memory Limits**: Enforces hard commit caps (default: 512 MB per process, 1024 MB cumulative job memory) to prevent memory-exhaustion DoS.
 - **Fork-Bomb & Quota Mitigation**: Restricts the maximum number of concurrent active processes (default: 16 processes) via `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`. Spawning runaway child processes triggers kernel quota limits (`WinError 1816`).
 - **Atomic Hierarchy Termination**: Timeouts and terminations execute `TerminateJobObject`, instantly killing every child and descendant process in the kernel with zero possibility of orphaned background processes or lingering reverse shells surviving.

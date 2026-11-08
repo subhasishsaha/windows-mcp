@@ -91,24 +91,23 @@ def execute_powershell(
     working_dir: Optional[str] = None,
     timeout: int = 120,
     elevate: bool = False,
-    use_sandbox: bool = True,
 ) -> Dict[str, Any]:
     """Execute a PowerShell command or script on the Windows computer.
 
-    Protected by security guardrails and isolated within a Windows Job Object sandbox by default.
+    Execution is strictly and immutably isolated within a Windows Job Object sandbox with kernel memory and process quotas.
+    Protected by security guardrails against RCE, disk formatting, and malicious payloads.
 
     Args:
         command: The PowerShell command, cmdlet, or script block to run.
         working_dir: Working directory path (default: current directory).
         timeout: Maximum execution time in seconds before terminating (default: 120).
         elevate: Whether to request Windows administrative privilege elevation (default: False).
-        use_sandbox: Whether to isolate execution within a Windows Job Object sandbox (default: True).
 
     Returns:
         Dictionary with 'stdout', 'stderr', 'return_code', 'execution_time_seconds', 'timed_out', and 'sandboxed'.
     """
-    logger.info("Executing PowerShell command (elevate=%s, sandbox=%s): %s", elevate, use_sandbox, command[:100])
-    return _execute_powershell(command=command, working_dir=working_dir, timeout=timeout, elevate=elevate, use_sandbox=use_sandbox)
+    logger.info("Executing PowerShell command (elevate=%s): %s", elevate, command[:100])
+    return _execute_powershell(command=command, working_dir=working_dir, timeout=timeout, elevate=elevate)
 
 
 @mcp.tool()
@@ -146,41 +145,41 @@ def execute_cmd(
     command: str,
     working_dir: Optional[str] = None,
     timeout: int = 120,
-    use_sandbox: bool = True,
 ) -> Dict[str, Any]:
     """Execute a Command Prompt (cmd.exe) command or batch line on Windows.
+
+    Execution is strictly and immutably isolated within a Windows Job Object sandbox with kernel memory and process quotas.
 
     Args:
         command: The cmd.exe command to run.
         working_dir: Working directory path (default: current directory).
         timeout: Maximum execution time in seconds (default: 120).
-        use_sandbox: Whether to isolate execution within a Windows Job Object sandbox (default: True).
 
     Returns:
         Dictionary with 'stdout', 'stderr', 'return_code', 'timed_out', and 'sandboxed'.
     """
-    logger.info("Executing CMD command (sandbox=%s): %s", use_sandbox, command[:100])
-    return _execute_cmd(command=command, working_dir=working_dir, timeout=timeout, use_sandbox=use_sandbox)
+    logger.info("Executing CMD command: %s", command[:100])
+    return _execute_cmd(command=command, working_dir=working_dir, timeout=timeout)
 
 
 @mcp.tool()
 def execute_python(
     code: str,
     timeout: int = 60,
-    use_sandbox: bool = True,
 ) -> Dict[str, Any]:
     """Execute Python code snippet directly inside this server's virtual environment.
+
+    Execution is strictly and immutably isolated within a Windows Job Object sandbox with kernel memory and process quotas.
 
     Args:
         code: Python source code snippet to execute.
         timeout: Maximum seconds to wait before terminating (default: 60).
-        use_sandbox: Whether to isolate execution within a Windows Job Object sandbox (default: True).
 
     Returns:
         Dictionary with 'stdout', 'stderr', 'return_code', 'timed_out', and 'sandboxed'.
     """
-    logger.info("Executing Python snippet (%d characters, sandbox=%s)", len(code), use_sandbox)
-    return _execute_python(code=code, timeout=timeout, use_sandbox=use_sandbox)
+    logger.info("Executing Python snippet (%d characters)", len(code))
+    return _execute_python(code=code, timeout=timeout)
 
 
 @mcp.tool()

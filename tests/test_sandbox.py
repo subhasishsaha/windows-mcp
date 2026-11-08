@@ -82,8 +82,8 @@ class TestWindowsJobSandbox(unittest.TestCase):
         self.assertIn("QUOTA_BLOCKED", raw_stdout.decode())
 
     def test_execute_powershell_sandboxed(self):
-        """Test execute_powershell tool running with sandboxing enabled."""
-        res = execute_powershell("Write-Output 'PowerShell In Job Sandbox'", use_sandbox=True)
+        """Test execute_powershell tool running with mandatory sandboxing."""
+        res = execute_powershell("Write-Output 'PowerShell In Job Sandbox'")
         self.assertEqual(res["return_code"], 0)
         self.assertIn("PowerShell In Job Sandbox", res["stdout"])
         self.assertTrue(res.get("sandboxed"))
@@ -92,34 +92,42 @@ class TestWindowsJobSandbox(unittest.TestCase):
         self.assertIn("peak_job_memory_mb", res["sandbox_metrics"])
 
     def test_execute_cmd_sandboxed(self):
-        """Test execute_cmd tool running with sandboxing enabled."""
-        res = execute_cmd("echo CMD In Job Sandbox", use_sandbox=True)
+        """Test execute_cmd tool running with mandatory sandboxing."""
+        res = execute_cmd("echo CMD In Job Sandbox")
         self.assertEqual(res["return_code"], 0)
         self.assertIn("CMD In Job Sandbox", res["stdout"])
         self.assertTrue(res.get("sandboxed"))
         self.assertEqual(res.get("sandbox_backend"), "windows_job_object")
 
     def test_execute_python_sandboxed(self):
-        """Test execute_python tool running with sandboxing enabled."""
-        res = execute_python("print(2 ** 10)", use_sandbox=True)
+        """Test execute_python tool running with mandatory sandboxing."""
+        res = execute_python("print(2 ** 10)")
         self.assertEqual(res["return_code"], 0)
         self.assertIn("1024", res["stdout"])
         self.assertTrue(res.get("sandboxed"))
         self.assertEqual(res.get("sandbox_backend"), "windows_job_object")
 
-    def test_execute_with_sandbox_disabled(self):
-        """Test running with use_sandbox=False falls back cleanly to standard execution."""
-        res = execute_cmd("echo Non-Sandboxed Execution", use_sandbox=False)
-        self.assertEqual(res["return_code"], 0)
-        self.assertIn("Non-Sandboxed Execution", res["stdout"])
-        self.assertFalse(res.get("sandboxed"))
+    def test_sandbox_is_mandatory_and_cannot_be_bypassed(self):
+        """Test that every command execution is sandboxed and cannot be bypassed."""
+        res_cmd = execute_cmd("echo Always Sandboxed")
+        self.assertTrue(res_cmd.get("sandboxed"))
+        self.assertEqual(res_cmd.get("sandbox_backend"), "windows_job_object")
+
+        res_ps = execute_powershell("Write-Output 'Always Sandboxed'")
+        self.assertTrue(res_ps.get("sandboxed"))
+        self.assertEqual(res_ps.get("sandbox_backend"), "windows_job_object")
+
+        res_py = execute_python("print('Always Sandboxed')")
+        self.assertTrue(res_py.get("sandboxed"))
+        self.assertEqual(res_py.get("sandbox_backend"), "windows_job_object")
 
     def test_get_security_status_includes_sandbox_info(self):
-        """Test that get_security_status provides sandbox metadata."""
+        """Test that get_security_status provides mandatory sandbox metadata."""
         status = get_security_status()
         self.assertEqual(status["sandbox_backend"], "windows_job_object")
         self.assertTrue(status["sandbox_supported"])
-        self.assertTrue(status["sandbox_enabled_by_default"])
+        self.assertTrue(status["sandbox_mandatory"])
+        self.assertFalse(status["sandbox_bypass_allowed"])
         self.assertIn("sandbox_limits", status)
         self.assertEqual(status["sandbox_limits"]["max_memory_mb"], 512)
         self.assertEqual(status["sandbox_limits"]["max_processes"], 16)
