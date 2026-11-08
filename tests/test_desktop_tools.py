@@ -41,7 +41,14 @@ class TestDesktopTools(unittest.TestCase):
         self.assertFalse(res2["success"])
         self.assertTrue(res2.get("blocked_by_guardrail"))
         self.assertIn("SECURITY POLICY VIOLATION", res2["error"])
-        self.assertTrue(res2.get("blocked_by_guardrail"))
+
+    def test_launch_app_blocks_shells_and_scripts(self):
+        """Test that launch_app explicitly rejects shell interpreters and scripts to enforce sandbox containment."""
+        for target in ("cmd.exe", "cmd", "powershell.exe", "pwsh", "python.exe", "wscript.exe", "run.bat", "setup.ps1"):
+            res = launch_app(target)
+            self.assertFalse(res["success"])
+            self.assertTrue(res.get("blocked_by_guardrail"))
+            self.assertIn("prohibited", res["error"])
 
     def test_take_screenshot_guardrail_block(self):
         """Test that screenshot saving prevents writing to system directories."""

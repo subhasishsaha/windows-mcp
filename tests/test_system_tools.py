@@ -62,16 +62,16 @@ class TestSystemTools(unittest.TestCase):
         self.assertIsNotNone(res_os["value"])
 
         # Sensitive variable masking
-        test_var_name = "TEST_MCP_SECRET_KEY"
-        os.environ[test_var_name] = "super_confidential_secret_value"
-        try:
-            res_secret = get_environment(var_name=test_var_name)
-            self.assertTrue(res_secret["exists"])
-            self.assertTrue(res_secret["is_masked"])
-            self.assertEqual(res_secret["value"], "********")
-            self.assertIn("note", res_secret)
-        finally:
-            del os.environ[test_var_name]
+        for var_name in ("TEST_MCP_SECRET_KEY", "DATABASE_URL", "GITHUB_PAT", "REDIS_URL"):
+            os.environ[var_name] = "super_confidential_secret_value"
+            try:
+                res_secret = get_environment(var_name=var_name)
+                self.assertTrue(res_secret["exists"])
+                self.assertTrue(res_secret["is_masked"])
+                self.assertEqual(res_secret["value"], "********")
+                self.assertIn("note", res_secret)
+            finally:
+                del os.environ[var_name]
 
 
 if __name__ == "__main__":

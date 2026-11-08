@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,62 @@ RESERVED_DEVICE_NAMES = {
     "lpt7",
     "lpt8",
     "lpt9",
+}
+
+# Shell interpreters and script files disallowed in launch_app (prevents sandbox bypass)
+DISALLOWED_LAUNCH_TARGETS = {
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "bash",
+    "bash.exe",
+    "sh",
+    "sh.exe",
+    "wsl",
+    "wsl.exe",
+    "python",
+    "python.exe",
+    "pythonw",
+    "pythonw.exe",
+    "wscript",
+    "wscript.exe",
+    "cscript",
+    "cscript.exe",
+}
+DISALLOWED_LAUNCH_EXTENSIONS = {
+    ".bat",
+    ".cmd",
+    ".ps1",
+    ".vbs",
+    ".js",
+    ".wsf",
+    ".sh",
+}
+
+# Sensitive credential directories and filenames protected from direct read exfiltration
+SENSITIVE_CREDENTIAL_DIRS = {
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".gcloud",
+    ".kube",
+    ".gnupg",
+    ".docker",
+}
+SENSITIVE_CREDENTIAL_FILES = {
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    "sam",
+    "system",
+    "security",
 }
 
 # ---------------------------------------------------------------------------
@@ -496,6 +553,106 @@ def validate_path_safety(path: str, operation: str = "delete") -> Tuple[bool, Op
     return True, None
 
 
+def validate_launch_safety(target: str, args: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    """Validate that target application is not a command interpreter or script bypassing the sandbox.
+
+    Args:
+        target: Application name, path, or URL.
+        args: Optional command line arguments.
+
+    Returns:
+        (is_safe, error_reason)
+    """
+    if not target or not target.strip():
+        return False, "SECURITY POLICY VIOLATION: Launch target cannot be empty."
+
+    clean_target = target.strip().strip("\"'")
+    clean_args = args.strip() if args else ""
+
+    # Check against general dangerous command patterns
+    cmd_to_validate = f"{clean_target} {clean_args}".strip()
+    is_safe, cmd_err = validate_command(cmd_to_validate)
+    if not is_safe:
+        return False, cmd_err
+
+    # Allow web URLs
+    if clean_target.lower().startswith(("http://", "https://")):
+        return True, None
+
+    # Check executable base name and extension against disallowed shells and scripts
+    norm = _normalize_windows_path(clean_target)
+    base_name = os.path.basename(norm).lower()
+    root_name, ext = os.path.splitext(base_name)
+
+    if base_name in DISALLOWED_LAUNCH_TARGETS or root_name in DISALLOWED_LAUNCH_TARGETS:
+        reason = (
+            f"Launching shell interpreter or runtime '{base_name}' via launch_app is prohibited to "
+            "prevent sandbox evasion. Use execute_powershell, execute_cmd, or execute_python instead."
+        )
+        audit_log("LAUNCH_BLOCKED", cmd_to_validate, allowed=False, reason=reason)
+        return False, f"SECURITY POLICY VIOLATION: {reason}"
+
+    if ext in DISALLOWED_LAUNCH_EXTENSIONS:
+        reason = (
+            f"Launching script file with extension '{ext}' via launch_app is prohibited to "
+            "prevent sandbox evasion. Use execute_powershell, execute_cmd, or execute_python instead."
+        )
+        audit_log("LAUNCH_BLOCKED", cmd_to_validate, allowed=False, reason=reason)
+        return False, f"SECURITY POLICY VIOLATION: {reason}"
+
+    return True, None
+
+
+def validate_read_safety(path: str) -> Tuple[bool, Optional[str]]:
+    """Validate that a target read path does not access protected credential or secret files.
+
+    Args:
+        path: File path to check.
+
+    Returns:
+        (is_safe, error_reason)
+    """
+    if not path or not path.strip():
+        return False, "SECURITY POLICY VIOLATION: Path cannot be empty."
+
+    clean_raw = path.strip().strip("\"'")
+    normalized = _normalize_windows_path(clean_raw)
+
+    try:
+        abs_raw = os.path.abspath(clean_raw).lower().replace("/", "\\")
+        abs_norm = os.path.abspath(normalized).lower().replace("/", "\\")
+        real_norm = os.path.realpath(normalized).lower().replace("/", "\\")
+    except Exception as e:
+        return False, f"Invalid path resolution: {str(e)}"
+
+    paths_to_check = {abs_raw, abs_norm, real_norm}
+
+    if STRICT_MODE:
+        for p in paths_to_check:
+            parts = [part.strip("\\/") for part in p.split("\\") if part.strip("\\/")]
+            # Check directory names
+            for part in parts:
+                if part.lower() in SENSITIVE_CREDENTIAL_DIRS:
+                    reason = f"Reading credential store or secret directory '{part}' is prohibited in STRICT_MODE."
+                    audit_log("READ_BLOCKED", path, allowed=False, reason=reason)
+                    return False, f"SECURITY POLICY VIOLATION: {reason}"
+
+            # Check leaf filename
+            leaf = parts[-1].lower() if parts else ""
+            if leaf in SENSITIVE_CREDENTIAL_FILES or leaf.startswith("id_"):
+                reason = f"Reading private key or credential file '{leaf}' is prohibited in STRICT_MODE."
+                audit_log("READ_BLOCKED", path, allowed=False, reason=reason)
+                return False, f"SECURITY POLICY VIOLATION: {reason}"
+
+            # Check SAM / SYSTEM registry hives
+            if "\\system32\\config\\sam" in p or "\\system32\\config\\system" in p or "\\system32\\config\\security" in p:
+                reason = "Reading Windows SAM/SYSTEM registry hive is prohibited."
+                audit_log("READ_BLOCKED", path, allowed=False, reason=reason)
+                return False, f"SECURITY POLICY VIOLATION: {reason}"
+
+    return True, None
+
+
 def _resolve_ast_str(node: ast.AST, scope: Dict[str, str]) -> Optional[str]:
     """Helper to statically resolve constant strings, binary concatenations, and variable references."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -716,10 +873,10 @@ def execute_elevated(command: str, timeout: int = 120) -> Dict[str, Any]:
             }
 
     # Otherwise, trigger elevation via PowerShell 'Start-Process -Verb RunAs'
-    out_fd, out_file = tempfile.mkstemp(prefix="mcp_out_", suffix=".txt")
-    err_fd, err_file = tempfile.mkstemp(prefix="mcp_err_", suffix=".txt")
-    os.close(out_fd)
-    os.close(err_fd)
+    mcp_temp_dir = os.path.join(tempfile.gettempdir(), f"mcp_elev_{os.getpid()}_{int(time.time() * 1000)}")
+    os.makedirs(mcp_temp_dir, exist_ok=True)
+    out_file = os.path.join(mcp_temp_dir, "stdout.txt")
+    err_file = os.path.join(mcp_temp_dir, "stderr.txt")
 
     # Safe PowerShell wrapper
     out_escaped = out_file.replace("'", "''")
@@ -805,9 +962,8 @@ exit $ec
             "execution_time_seconds": round(time.time() - start_time, 2),
         }
     finally:
-        for fpath in (out_file, err_file):
-            if os.path.exists(fpath):
-                try:
-                    os.remove(fpath)
-                except Exception:
-                    pass
+        if os.path.exists(mcp_temp_dir):
+            try:
+                shutil.rmtree(mcp_temp_dir, ignore_errors=True)
+            except Exception:
+                pass

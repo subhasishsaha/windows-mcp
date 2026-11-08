@@ -6,7 +6,7 @@ import shutil
 import stat
 import time
 from typing import Any, Dict, List, Optional
-from security import validate_path_safety
+from security import validate_path_safety, validate_read_safety
 
 
 def _format_time(timestamp: float) -> str:
@@ -44,6 +44,12 @@ def read_file(
         Dictionary containing file content, total line count, and range details.
     """
     abs_path = os.path.abspath(path)
+
+    # Guardrail: Prevent unauthorized exfiltration of credential stores and sensitive files
+    is_safe, sec_err = validate_read_safety(abs_path)
+    if not is_safe:
+        return {"error": sec_err or "Reading sensitive file blocked by security guardrails.", "path": abs_path, "blocked_by_guardrail": True}
+
     if not os.path.exists(abs_path):
         return {"error": f"File does not exist: {abs_path}", "path": abs_path}
     if not os.path.isfile(abs_path):

@@ -10,7 +10,7 @@ import xml.sax.saxutils
 from typing import Any, Dict, List, Optional
 import pyperclip
 from PIL import ImageGrab
-from security import validate_command, validate_path_safety
+from security import validate_command, validate_launch_safety, validate_path_safety
 
 
 def launch_app(
@@ -29,9 +29,8 @@ def launch_app(
     clean_target = target.strip()
     clean_args = args.strip() if args else ""
 
-    # Guardrail: Enforce command validation against dangerous executables/parameters
-    cmd_to_validate = f"{clean_target} {clean_args}".strip()
-    is_safe, sec_err = validate_command(cmd_to_validate)
+    # Guardrail: Enforce launch safety against dangerous executables, parameters, and shell sandbox evasion
+    is_safe, sec_err = validate_launch_safety(clean_target, clean_args)
     if not is_safe:
         return {
             "success": False,

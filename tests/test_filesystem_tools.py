@@ -58,6 +58,26 @@ class TestFilesystemTools(unittest.TestCase):
         res = read_file(bad_path)
         self.assertIn("error", res)
 
+    def test_read_file_blocks_sensitive_credential_paths(self):
+        """Test that read_file blocks reading sensitive credential and secret stores."""
+        import security
+        old_strict = security.STRICT_MODE
+        try:
+            security.STRICT_MODE = True
+            for sensitive in (
+                r"C:\Users\User\.ssh\id_rsa",
+                r"C:\Users\User\.aws\credentials",
+                r"C:\Users\User\.git-credentials",
+                r"C:\Users\User\.kube\config",
+                r"C:\Windows\System32\config\SAM",
+            ):
+                res = read_file(sensitive)
+                self.assertIn("error", res)
+                self.assertTrue(res.get("blocked_by_guardrail"))
+                self.assertIn("SECURITY POLICY VIOLATION", res["error"])
+        finally:
+            security.STRICT_MODE = old_strict
+
     def test_write_file_guardrail_block(self):
         """Test that writing to protected system directories is blocked."""
         system_file = r"C:\Windows\System32\mcp_exploit_test.dll"

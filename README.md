@@ -5,7 +5,7 @@
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20%2F%20Server-0078D6.svg)](https://www.microsoft.com/windows)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/protocol-MCP%202024--11--05-purple.svg)](https://modelcontextprotocol.io/)
 [![Built with FastMCP](https://img.shields.io/badge/built%20with-FastMCP%20v4-brightgreen.svg)](https://github.com/jlowin/fastmcp)
-[![Tests: 64 Passing](https://img.shields.io/badge/tests-64%20passed-success.svg)](tests/)
+[![Tests: 66 Passing](https://img.shields.io/badge/tests-66%20passed-success.svg)](tests/)
 
 A secure, high-performance, strictly local **Model Context Protocol (MCP)** server built with **FastMCP** that connects AI assistants (**Antigravity, AGY CLI, Claude Desktop, Cursor, Cline, Roo Code**) to your local Windows environment.
 
