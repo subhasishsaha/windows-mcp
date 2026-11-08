@@ -6,11 +6,10 @@ import shlex
 import subprocess
 import time
 import webbrowser
-import xml.sax.saxutils
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 import pyperclip
 from PIL import ImageGrab
-from security import validate_command, validate_launch_safety, validate_path_safety
+from security import validate_launch_safety, validate_path_safety
 
 
 def launch_app(
@@ -201,10 +200,6 @@ def show_notification(title: str, message: str) -> Dict[str, Any]:
     Returns:
         Dictionary with notification delivery status.
     """
-    # XML escape title and message to prevent XML malformation or script breakout
-    xml_title = xml.sax.saxutils.escape(title)
-    xml_message = xml.sax.saxutils.escape(message)
-
     # Encode safe strings into base64 to eliminate any PowerShell quoting or script injection issues
     b64_title = base64.b64encode(title.encode("utf-8")).decode("ascii")
     b64_msg = base64.b64encode(message.encode("utf-8")).decode("ascii")
@@ -217,18 +212,13 @@ try {{
     [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
     [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 
-    $template = @"
-<toast>
-    <visual>
-        <binding template="ToastGeneric">
-            <text>{xml_title}</text>
-            <text>{xml_message}</text>
-        </binding>
-    </visual>
-</toast>
-"@
+    $xmlDoc = New-Object System.Xml.XmlDocument
+    $xmlDoc.LoadXml('<toast><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual></toast>')
+    $xmlDoc.DocumentElement.visual.binding.text[0].InnerText = $rawTitle
+    $xmlDoc.DocumentElement.visual.binding.text[1].InnerText = $rawMessage
+
     $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-    $xml.LoadXml($template)
+    $xml.LoadXml($xmlDoc.OuterXml)
     $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
     [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Windows MCP Assistant").Show($toast)
 }} catch {{

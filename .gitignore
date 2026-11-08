@@ -21,6 +21,8 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Logs & Security Audit Records
 *.log
@@ -29,6 +31,13 @@ security_audit.log
 # Temporary screenshots
 screenshots/
 *.png
+
+# Secrets & Environment
+.env
+.env.*
+
+# Agent Framework
+.agents/
 
 # IDE & Editor Settings
 .vscode/
@@ -39,3 +48,4 @@ screenshots/
 # OS artifacts
 Thumbs.db
 desktop.ini
+.DS_Store

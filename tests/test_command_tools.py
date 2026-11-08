@@ -36,6 +36,12 @@ class TestCommandTools(unittest.TestCase):
         self.assertEqual(res["return_code"], -1)
         self.assertIn("Working directory does not exist", res["stderr"])
 
+    def test_execute_powershell_elevated_invalid_working_dir(self):
+        """Test elevated PowerShell execution with non-existent working directory returns error."""
+        res = execute_powershell("Get-Date", working_dir=r"C:\NonExistent_Elevated_12345", elevate=True)
+        self.assertEqual(res["return_code"], -1)
+        self.assertIn("Invalid working directory", res["stderr"])
+
     def test_execute_powershell_timeout(self):
         """Test that long-running commands terminate cleanly on timeout."""
         res = execute_powershell("Start-Sleep -Seconds 10", timeout=1)

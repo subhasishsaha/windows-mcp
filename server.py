@@ -13,10 +13,12 @@ STRICT LOCALHOST ONLY: Binds exclusively to 127.0.0.1 on the /mcp endpoint. No c
 """
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
 import re
+import secrets
 import sys
 from typing import Any, Dict, List, Optional
 from fastmcp import FastMCP
@@ -114,6 +116,7 @@ def execute_powershell(
 def execute_elevated_command(
     command: str,
     timeout: int = 120,
+    working_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a command with Administrator / Elevated privileges via Windows UAC.
 
@@ -122,12 +125,13 @@ def execute_elevated_command(
     Args:
         command: PowerShell command or script to execute with elevation.
         timeout: Maximum execution time in seconds (default: 120).
+        working_dir: Optional working directory for command execution.
 
     Returns:
         Dictionary with stdout, stderr, return_code, execution_time_seconds, and elevation status.
     """
     logger.warning("Executing ELEVATED command: %s", command[:100])
-    return _execute_elevated_command(command=command, timeout=timeout)
+    return _execute_elevated_command(command=command, timeout=timeout, working_dir=working_dir)
 
 
 @mcp.tool()
@@ -513,13 +517,73 @@ def system_health_check_prompt() -> str:
 # Main Entry Point & Host Defense
 # ==========================================
 
-ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
+
+
+def _parse_host_header(host: str) -> Optional[str]:
+    """Extract and validate the host component from a Host header or address string.
+
+    Returns the bare host (e.g., '127.0.0.1', 'localhost', '::1') if valid,
+    or None if the host string is malformed or contains an invalid port.
+    """
+    if not host:
+        return None
+    clean = host.strip().lower()
+    if not clean:
+        return None
+
+    # Handle IPv6 bracket format: [::1] or [::1]:8000
+    if clean.startswith("["):
+        bracket_end = clean.find("]")
+        if bracket_end == -1:
+            return None  # Unclosed bracket
+        host_part = clean[1:bracket_end]
+        remainder = clean[bracket_end + 1:]
+        if remainder:
+            if not remainder.startswith(":"):
+                return None  # Malformed suffix: e.g. [::1].evil.com
+            port_str = remainder[1:]
+            if not (port_str.isdigit() and 1 <= int(port_str) <= 65535):
+                return None  # Malformed port: e.g. [::1]:8000.evil.com or [::1]:abc
+        return host_part
+
+    # IPv4 or hostname with optional port: host or host:port
+    if ":" in clean:
+        parts = clean.split(":")
+        if len(parts) == 2:
+            host_part, port_str = parts
+            if not (port_str.isdigit() and 1 <= int(port_str) <= 65535):
+                return None  # Malformed port: e.g. 127.0.0.1:8000.evil.com
+            return host_part
+        else:
+            # Multiple colons without brackets - check if valid raw IPv6 address (e.g. ::1)
+            try:
+                ip = ipaddress.ip_address(clean)
+                if ip.version == 6:
+                    return clean
+            except ValueError:
+                pass
+            return None
+
+    return clean
 
 
 def _is_loopback(host: str) -> bool:
-    """Check if the provided host address is strictly a loopback address."""
-    clean_host = host.strip().lower()
-    return clean_host in ALLOWED_LOOPBACK_HOSTS or clean_host.startswith("127.")
+    """Check if the provided host address is strictly a loopback address or loopback hostname.
+
+    Supports IPv4 127.0.0.0/8, IPv6 ::1, 'localhost', and Starlette 'testserver'.
+    Rejects any public or external domains starting with '127.' (e.g. 127.evil.com).
+    """
+    clean_host = _parse_host_header(host)
+    if not clean_host:
+        return False
+
+    if clean_host in ALLOWED_LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(clean_host).is_loopback
+    except ValueError:
+        return False
 
 
 def _is_safe_origin(origin: str) -> bool:
@@ -532,7 +596,7 @@ def _is_safe_origin(origin: str) -> bool:
         return True
     origin_lower = origin.strip().lower()
     if origin_lower == "null":
-        return True  # Local file / Electron
+        return False  # Disallow "null" origin to prevent sandboxed iframe bypass
     # Allow http or https on localhost, 127.0.0.1, or [::1], with or without explicit port
     if re.match(r"^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$", origin_lower):
         return True
@@ -548,23 +612,89 @@ def _is_safe_host(host_header: str, allowed_host: str = "127.0.0.1", allow_remot
     """
     if not host_header:
         return True
-    clean_host = host_header.strip().lower()
-    # Handle IPv6 bracket format [::1] or [::1]:8000
-    if clean_host.startswith("["):
-        bracket_end = clean_host.find("]")
-        if bracket_end != -1:
-            clean_host = clean_host[1:bracket_end]
-        else:
-            clean_host = clean_host.lstrip("[")
-    elif ":" in clean_host and clean_host.count(":") == 1:
-        # Standard host:port (IPv4 or hostname)
-        clean_host = clean_host.split(":")[0]
+    clean_host = _parse_host_header(host_header)
+    if not clean_host:
+        return False
 
-    if clean_host in ("127.0.0.1", "localhost", "::1", "testserver") or clean_host.startswith("127."):
+    if _is_loopback(clean_host):
         return True
-    if allow_remote or clean_host == allowed_host.strip().lower().split(":")[0]:
+    if allow_remote:
         return True
-    return False
+
+    clean_allowed = _parse_host_header(allowed_host)
+    if not clean_allowed:
+        clean_allowed = allowed_host.strip().lower()
+
+    return clean_host == clean_allowed
+
+
+class LocalCorsMiddleware(BaseHTTPMiddleware):
+    """Enforce CORS, DNS rebinding protection, and optional Bearer token authentication."""
+
+    def __init__(self, app, allowed_host: str = "127.0.0.1", allow_remote_access: bool = False):
+        super().__init__(app)
+        self.allowed_host = allowed_host
+        self.allow_remote_access = allow_remote_access
+
+    async def dispatch(self, request, call_next):
+        host = request.headers.get("host", "")
+        if host and not _is_safe_host(host, self.allowed_host, self.allow_remote_access):
+            logger.warning("BLOCKED untrusted Host header: %s", host)
+            return Response(
+                status_code=403,
+                content="Host header validation failed (DNS rebinding protection).",
+            )
+
+        origin = request.headers.get("origin", "")
+        if origin and not _is_safe_origin(origin):
+            logger.warning("BLOCKED untrusted cross-origin request from: %s", origin)
+            return Response(
+                status_code=403,
+                content="Cross-Origin requests from external domains are prohibited.",
+            )
+
+        allow_origin = origin if origin else "*"
+
+        if request.method == "OPTIONS":
+            return Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": allow_origin,
+                    "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                },
+            )
+
+        # Optional Bearer Token Authentication via MCP_AUTH_TOKEN
+        auth_token = os.environ.get("MCP_AUTH_TOKEN")
+        if auth_token:
+            auth_header = request.headers.get("authorization", "").strip()
+            # RFC 7235: auth scheme names are case-insensitive ('Bearer' or 'bearer')
+            scheme, _, token = auth_header.partition(" ")
+            if scheme.lower() != "bearer" or not secrets.compare_digest(token.strip(), auth_token):
+                logger.warning("UNAUTHORIZED request: missing or invalid Bearer token.")
+                return Response(
+                    status_code=401,
+                    content="Unauthorized: Missing or invalid Bearer token.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+        if request.method == "HEAD":
+            return Response(
+                status_code=200,
+                headers={
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": allow_origin,
+                    "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                },
+            )
+
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = allow_origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, HEAD, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -632,58 +762,18 @@ def main() -> None:
         )
         asgi_app = base_app.routes[0].endpoint
 
-        class LocalCorsMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                host = request.headers.get("host", "")
-                if host and not _is_safe_host(host, args.host, args.allow_remote_access):
-                    logger.warning("BLOCKED untrusted Host header: %s", host)
-                    return Response(
-                        status_code=403,
-                        content="Host header validation failed (DNS rebinding protection).",
-                    )
-
-                origin = request.headers.get("origin", "")
-                if origin and not _is_safe_origin(origin):
-                    logger.warning("BLOCKED untrusted cross-origin request from: %s", origin)
-                    return Response(
-                        status_code=403,
-                        content="Cross-Origin requests from external domains are prohibited.",
-                    )
-
-                allow_origin = origin if origin else "*"
-
-                if request.method == "HEAD":
-                    return Response(
-                        status_code=200,
-                        headers={
-                            "Content-Type": "application/json",
-                            "Access-Control-Allow-Origin": allow_origin,
-                            "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
-                            "Access-Control-Allow-Headers": "*",
-                        },
-                    )
-                if request.method == "OPTIONS":
-                    return Response(
-                        status_code=200,
-                        headers={
-                            "Access-Control-Allow-Origin": allow_origin,
-                            "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
-                            "Access-Control-Allow-Headers": "*",
-                        },
-                    )
-
-                response = await call_next(request)
-                response.headers["Access-Control-Allow-Origin"] = allow_origin
-                response.headers["Access-Control-Allow-Methods"] = "GET, POST, HEAD, OPTIONS"
-                response.headers["Access-Control-Allow-Headers"] = "*"
-                return response
-
         # Strictly /mcp endpoint only (no cloud/sse routes)
         local_app = Starlette(
             routes=[
                 Route("/mcp", asgi_app),
             ],
-            middleware=[Middleware(LocalCorsMiddleware)],
+            middleware=[
+                Middleware(
+                    LocalCorsMiddleware,
+                    allowed_host=args.host,
+                    allow_remote_access=args.allow_remote_access,
+                )
+            ],
             lifespan=base_app.lifespan,
         )
 

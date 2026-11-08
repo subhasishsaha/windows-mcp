@@ -25,7 +25,7 @@ Because this MCP server provides authorized system automation on local Windows m
 
 1. **Clone the repository**:
    ```powershell
-   git clone https://github.com/your-username/windows-mcp.git
+   git clone https://github.com/subhasishsaha/windows-mcp.git
    cd windows-mcp
    ```
 
@@ -59,6 +59,7 @@ pytest tests/test_filesystem_tools.py -v
 pytest tests/test_system_tools.py -v
 pytest tests/test_desktop_tools.py -v
 pytest tests/test_server.py -v
+pytest tests/test_sandbox.py -v
 ```
 
 ---
@@ -78,6 +79,6 @@ pytest tests/test_server.py -v
 
 1. Create a feature branch: `git checkout -b feature/my-enhancement`
 2. Make your changes and add corresponding unit tests in `tests/`
-3. Run the full test suite (`pytest`) and ensure all 50+ tests pass
+3. Run the full test suite (`pytest`) and ensure all 84 tests pass
 4. Commit your changes with clear messages: `git commit -m "feat(security): add detection for X"`
 5. Push to your branch and open a Pull Request

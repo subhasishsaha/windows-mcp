@@ -120,7 +120,7 @@ class TestFilesystemTools(unittest.TestCase):
 
     def test_delete_guardrail_blocks_system_path(self):
         """Test that delete_file_or_dir prevents deleting system paths and drive roots."""
-        for target in ("C:\\", r"C:\Windows", r"C:\Windows\System32"):
+        for target in ("C:\\", r"C:\Windows", r"C:\Windows\System32", "C:", "E:"):
             res = delete_file_or_dir(target, recursive=True)
             self.assertFalse(res["success"])
             self.assertTrue(res.get("blocked_by_guardrail"))
@@ -146,7 +146,7 @@ class TestFilesystemTools(unittest.TestCase):
         self.assertTrue(os.path.exists(dst2))
 
     def test_copy_or_move_guardrail_block(self):
-        """Test that copy_or_move protects system destinations and sources."""
+        """Test that copy_or_move protects system destinations, sources, and sensitive credentials."""
         src = os.path.join(self.test_dir, "payload.dll")
         write_file(src, "payload")
 
@@ -160,6 +160,32 @@ class TestFilesystemTools(unittest.TestCase):
         res_src_block = copy_or_move(system_root, os.path.join(self.test_dir, "stolen"), action="move")
         self.assertFalse(res_src_block["success"])
         self.assertTrue(res_src_block.get("blocked_by_guardrail"))
+
+        # Credential source in copy blocked
+        res_cred_copy = copy_or_move(r"C:\Users\Default\.ssh\id_rsa", os.path.join(self.test_dir, "stolen_key"), action="copy")
+        self.assertFalse(res_cred_copy["success"])
+        self.assertTrue(res_cred_copy.get("blocked_by_guardrail"))
+        self.assertIn("SECURITY POLICY VIOLATION", res_cred_copy["error"])
+
+        # Credential source in move blocked
+        res_cred_move = copy_or_move(r"C:\Users\Default\.aws\credentials", os.path.join(self.test_dir, "stolen_aws"), action="move")
+        self.assertFalse(res_cred_move["success"])
+        self.assertTrue(res_cred_move.get("blocked_by_guardrail"))
+
+        # .env secret source blocked
+        res_env_copy = copy_or_move(os.path.join(self.test_dir, ".env"), os.path.join(self.test_dir, "leaked.env"), action="copy")
+        self.assertFalse(res_env_copy["success"])
+        self.assertTrue(res_env_copy.get("blocked_by_guardrail"))
+
+    def test_write_file_accurate_byte_count(self):
+        """Test that write_file correctly computes byte count for multi-byte UTF-8 content."""
+        emoji_content = "Windows MCP 🚀 Security Audit 🛡️"
+        target = os.path.join(self.test_dir, "emoji_test.txt")
+        res = write_file(target, emoji_content, encoding="utf-8")
+        self.assertTrue(res["success"])
+        self.assertEqual(res["characters_written"], len(emoji_content))
+        self.assertEqual(res["bytes_written"], len(emoji_content.encode("utf-8")))
+        self.assertGreater(res["bytes_written"], res["characters_written"])
 
     def test_list_and_search_files(self):
         """Test directory listing and wildcard file search."""

@@ -9,8 +9,6 @@ Provides kernel-enforced containment and resource isolation for subprocess execu
 
 import os
 import subprocess
-import sys
-import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -233,12 +231,20 @@ def run_in_job_sandbox(
     try:
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
         )
         # Immediately assign the process to the Job Object
-        sandbox.assign_process(proc)
+        assigned = sandbox.assign_process(proc)
+        if not assigned and proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+            raise RuntimeError("Failed to assign child process to Windows Job Object sandbox.")
 
         try:
             raw_stdout, raw_stderr = proc.communicate(timeout=timeout)
@@ -247,6 +253,10 @@ def run_in_job_sandbox(
             timed_out = True
             # Atomically terminate the entire process hierarchy in kernel
             sandbox.terminate(exit_code=win32con.STATUS_TIMEOUT if HAS_WIN32JOB else -1)
+            try:
+                proc.kill()
+            except Exception:
+                pass
             raw_stdout, raw_stderr = proc.communicate()
             returncode = -1
 
@@ -254,4 +264,9 @@ def run_in_job_sandbox(
         return raw_stdout, raw_stderr, returncode, timed_out, metrics
 
     finally:
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         sandbox.close()

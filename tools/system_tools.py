@@ -5,7 +5,7 @@ import platform
 import re
 import socket
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 import psutil
 from security import STRICT_MODE
 

@@ -21,7 +21,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -141,6 +140,14 @@ DISALLOWED_LAUNCH_TARGETS = {
     "wscript.exe",
     "cscript",
     "cscript.exe",
+    "mshta",
+    "mshta.exe",
+    "rundll32",
+    "rundll32.exe",
+    "regsvr32",
+    "regsvr32.exe",
+    "conhost",
+    "conhost.exe",
 }
 DISALLOWED_LAUNCH_EXTENSIONS = {
     ".bat",
@@ -150,6 +157,10 @@ DISALLOWED_LAUNCH_EXTENSIONS = {
     ".js",
     ".wsf",
     ".sh",
+    ".hta",
+    ".pif",
+    ".scr",
+    ".com",
 }
 
 # Sensitive credential directories and filenames protected from direct read exfiltration
@@ -166,6 +177,9 @@ SENSITIVE_CREDENTIAL_FILES = {
     ".git-credentials",
     ".npmrc",
     ".pypirc",
+    ".env",
+    ".netrc",
+    "_netrc",
     "id_rsa",
     "id_ed25519",
     "id_ecdsa",
@@ -229,7 +243,7 @@ DANGEROUS_COMMAND_PATTERNS = [
         "USN journal deletion (fsutil) is blocked.",
     ),
     (
-        r"\bbcdedit(\.exe)?\s+/(delete|set)\b",
+        r"\bbcdedit(\.exe)?(?:\s+|\s*/)(?:delete|set)\b",
         "Boot configuration modification/deletion (bcdedit) is blocked.",
     ),
 
@@ -255,7 +269,7 @@ DANGEROUS_COMMAND_PATTERNS = [
         "Stopping Windows Defender or security services is blocked.",
     ),
     (
-        r"taskkill(\.exe)?\s+.*\/im\s+msmpeng\.exe",
+        r"\btaskkill(\.exe)?(?:\s+|/|\b).*(?:\/|-)?im(?::|\s+|\/.*|\b).*msmpeng\.exe",
         "Terminating Windows Defender process (MsMpEng) is blocked.",
     ),
 
@@ -305,15 +319,15 @@ DANGEROUS_COMMAND_PATTERNS = [
 
     # 5. Dangerous Recursive Root & System Deletions
     (
-        r"(?:rd|rmdir)\s+.*(?:\/s|\/q).*(?:[a-zA-Z]:(?:[\\\/](?:\*|\*\.\*)?)?[\"'\s]*$|windows|system32)",
+        r"\b(?:rd|rmdir)\b(?:\s+|(?=/))(?=.*(?:\/s|\/q))(?=.*(?:\b[a-zA-Z]:(?:[\\\/](?:\*|\*\.\*)?)?(?:[\"'\s;&|>}]|$)|windows|system32))",
         "Recursive deletion of entire drive root or Windows system directories is blocked.",
     ),
     (
-        r"(?:del|erase)\s+.*(?:\/s|\/f|\/q).*(?:[a-zA-Z]:(?:[\\\/](?:\*|\*\.\*)?)?[\"'\s]*$|windows|system32)",
+        r"\b(?:del|erase)\b(?:\s+|(?=/))(?=.*(?:\/s|\/f|\/q))(?=.*(?:\b[a-zA-Z]:(?:[\\\/](?:\*|\*\.\*)?)?(?:[\"'\s;&|>}]|$)|windows|system32))",
         "Recursive deletion of entire drive root or Windows system directories is blocked.",
     ),
     (
-        r"(?:remove-item|rm|ri)\s+.*(?:-recurse|-r|-force|-fo).*(?:[a-zA-Z]:(?:[\\\/](?:\*|\*\.\*)?)?[\"'\s]*$|windows|system32)",
+        r"\b(?:remove-item|rm|ri)\b\s+(?=.*(?:-recurse|-r|-force|-fo))(?=.*(?:\b[a-zA-Z]:(?:[\\\/](?:\*|\*\.\*)?)?(?:[\"'\s;&|>}]|$)|windows|system32))",
         "PowerShell recursive deletion of drive root or Windows system directories is blocked.",
     ),
 
@@ -372,6 +386,8 @@ def _normalize_windows_path(path: str) -> str:
     if not path:
         return ""
     norm = path.strip().strip("\"'").replace("/", "\\")
+    if re.match(r"^[a-zA-Z]:$", norm):
+        norm = norm + "\\"
     # Extended UNC prefix: \\?\UNC\server\share
     if norm.lower().startswith("\\\\?\\unc\\"):
         norm = "\\\\" + norm[8:]
@@ -451,6 +467,37 @@ def _check_encoded_command(command: str) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
+def _normalize_command_variants(command: str) -> List[str]:
+    """Generate normalized command variants to defeat shell escape, quote wrapping, and delimiter evasions."""
+    clean_cmd = command.strip()
+    if not clean_cmd:
+        return []
+
+    # 1. Base escape stripping: remove PowerShell backticks and CMD carets
+    base = clean_cmd.replace("`", "").replace("^", "")
+
+    # 2. Strip single and double quotes
+    no_quotes = base.replace('"', "").replace("'", "")
+
+    # 3. Insert space before CMD switches preceded by alphanumeric characters
+    switch_spaced = re.sub(r'([a-zA-Z0-9])/', r'\1 /', no_quotes)
+
+    # 4. Quote-to-space normalization (handles unspaced quotes e.g. vssadmin"delete""shadows")
+    quotes_as_spaces = re.sub(r'["\']+', ' ', base)
+    quotes_as_spaces = re.sub(r'([a-zA-Z0-9])/', r'\1 /', quotes_as_spaces)
+
+    candidates = [clean_cmd, base, no_quotes, switch_spaced, quotes_as_spaces]
+    normalized_list: List[str] = []
+    for c in candidates:
+        if c and c not in normalized_list:
+            normalized_list.append(c)
+        cleaned = " ".join(c.split())
+        if cleaned and cleaned not in normalized_list:
+            normalized_list.append(cleaned)
+
+    return normalized_list
+
+
 def validate_command(command: str, _is_subcheck: bool = False) -> Tuple[bool, Optional[str]]:
     """Validate a shell command against the guardrail policy.
 
@@ -465,19 +512,23 @@ def validate_command(command: str, _is_subcheck: bool = False) -> Tuple[bool, Op
     if not clean_cmd:
         return True, None
 
-    # 1. Check for encoded PowerShell payload bypasses
-    enc_safe, enc_err = _check_encoded_command(clean_cmd)
-    if not enc_safe:
-        if not _is_subcheck:
-            audit_log("COMMAND_BLOCKED", command, allowed=False, reason=enc_err or "")
-        return False, enc_err
+    normalized_variants = _normalize_command_variants(clean_cmd)
 
-    # 2. Check dangerous regex patterns
-    for pattern, description in DANGEROUS_COMMAND_PATTERNS:
-        if re.search(pattern, clean_cmd, re.IGNORECASE):
+    # 1. Check for encoded PowerShell payload bypasses across original and normalized variants
+    for variant in normalized_variants:
+        enc_safe, enc_err = _check_encoded_command(variant)
+        if not enc_safe:
             if not _is_subcheck:
-                audit_log("COMMAND_BLOCKED", command, allowed=False, reason=description)
-            return False, f"SECURITY POLICY VIOLATION: {description}"
+                audit_log("COMMAND_BLOCKED", command, allowed=False, reason=enc_err or "")
+            return False, enc_err
+
+    # 2. Check dangerous regex patterns against original and all normalized variants
+    for pattern, description in DANGEROUS_COMMAND_PATTERNS:
+        for variant in normalized_variants:
+            if re.search(pattern, variant, re.IGNORECASE):
+                if not _is_subcheck:
+                    audit_log("COMMAND_BLOCKED", command, allowed=False, reason=description)
+                return False, f"SECURITY POLICY VIOLATION: {description}"
 
     if not _is_subcheck:
         audit_log("COMMAND_ALLOWED", command, allowed=True)
@@ -500,6 +551,8 @@ def validate_path_safety(path: str, operation: str = "delete") -> Tuple[bool, Op
         return False, "SECURITY POLICY VIOLATION: Path cannot be empty."
 
     clean_raw = path.strip().strip("\"'")
+    if re.match(r"^[a-zA-Z]:$", clean_raw):
+        clean_raw = clean_raw + "\\"
     normalized = _normalize_windows_path(clean_raw)
 
     # 1. Check for reserved DOS device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
@@ -523,6 +576,14 @@ def validate_path_safety(path: str, operation: str = "delete") -> Tuple[bool, Op
         p_norm = _normalize_windows_path(p).lower().rstrip("\\/")
         if p_norm:
             paths_to_check.add(p_norm)
+
+    # Protect security audit log file from deletion or modification
+    audit_log_norm = os.path.abspath(AUDIT_LOG_FILE).lower().rstrip("\\/")
+    for p in paths_to_check:
+        if p == audit_log_norm:
+            reason = f"Destructive operation '{operation}' is prohibited on security audit log: {path}"
+            audit_log("PATH_BLOCKED", path, allowed=False, reason=reason)
+            return False, f"SECURITY POLICY VIOLATION: {reason}"
 
     for p in paths_to_check:
         # 2. Check drive roots (e.g. C:, C:\, D:\)
@@ -616,7 +677,17 @@ def validate_read_safety(path: str) -> Tuple[bool, Optional[str]]:
         return False, "SECURITY POLICY VIOLATION: Path cannot be empty."
 
     clean_raw = path.strip().strip("\"'")
+    if re.match(r"^[a-zA-Z]:$", clean_raw):
+        clean_raw = clean_raw + "\\"
     normalized = _normalize_windows_path(clean_raw)
+
+    # 1. Check for reserved DOS device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) to prevent hang
+    for check_str in (clean_raw, normalized):
+        base_name = os.path.basename(check_str).lower().split(".")[0]
+        if base_name in RESERVED_DEVICE_NAMES:
+            reason = f"Reading Windows reserved device '{check_str}' is prohibited."
+            audit_log("READ_BLOCKED", path, allowed=False, reason=reason)
+            return False, f"SECURITY POLICY VIOLATION: {reason}"
 
     try:
         abs_raw = os.path.abspath(clean_raw).lower().replace("/", "\\")
@@ -626,6 +697,13 @@ def validate_read_safety(path: str) -> Tuple[bool, Optional[str]]:
         return False, f"Invalid path resolution: {str(e)}"
 
     paths_to_check = {abs_raw, abs_norm, real_norm}
+
+    # Unconditional protection for SAM / SYSTEM / SECURITY registry hives regardless of STRICT_MODE
+    for p in paths_to_check:
+        if "\\system32\\config\\sam" in p or "\\system32\\config\\system" in p or "\\system32\\config\\security" in p:
+            reason = "Reading Windows SAM/SYSTEM/SECURITY registry hive is prohibited."
+            audit_log("READ_BLOCKED", path, allowed=False, reason=reason)
+            return False, f"SECURITY POLICY VIOLATION: {reason}"
 
     if STRICT_MODE:
         for p in paths_to_check:
@@ -639,14 +717,14 @@ def validate_read_safety(path: str) -> Tuple[bool, Optional[str]]:
 
             # Check leaf filename
             leaf = parts[-1].lower() if parts else ""
-            if leaf in SENSITIVE_CREDENTIAL_FILES or leaf.startswith("id_"):
-                reason = f"Reading private key or credential file '{leaf}' is prohibited in STRICT_MODE."
-                audit_log("READ_BLOCKED", path, allowed=False, reason=reason)
-                return False, f"SECURITY POLICY VIOLATION: {reason}"
-
-            # Check SAM / SYSTEM registry hives
-            if "\\system32\\config\\sam" in p or "\\system32\\config\\system" in p or "\\system32\\config\\security" in p:
-                reason = "Reading Windows SAM/SYSTEM registry hive is prohibited."
+            if (
+                leaf in SENSITIVE_CREDENTIAL_FILES
+                or leaf.startswith("id_")
+                or leaf == ".env"
+                or leaf.startswith(".env.")
+                or leaf in (".netrc", "_netrc")
+            ):
+                reason = f"Reading private key, environment, or credential file '{leaf}' is prohibited in STRICT_MODE."
                 audit_log("READ_BLOCKED", path, allowed=False, reason=reason)
                 return False, f"SECURITY POLICY VIOLATION: {reason}"
 
@@ -704,8 +782,8 @@ def validate_python_code(code: str) -> Tuple[bool, Optional[str]]:
 
     try:
         tree = ast.parse(clean_code)
-    except SyntaxError:
-        # Normal execution will catch and report Python syntax errors
+    except Exception:
+        # Normal execution will catch and report Python syntax or parsing errors
         return True, None
 
     # Build local variable scope mapping for string assignments
@@ -793,7 +871,7 @@ def validate_python_code(code: str) -> Tuple[bool, Optional[str]]:
 # ---------------------------------------------------------------------------
 # Elevated Command Execution
 # ---------------------------------------------------------------------------
-def execute_elevated(command: str, timeout: int = 120) -> Dict[str, Any]:
+def execute_elevated(command: str, timeout: int = 120, working_dir: Optional[str] = None) -> Dict[str, Any]:
     """Execute a PowerShell command with administrative privileges via Windows UAC elevation.
 
     Enforces all security guardrails before granting elevation.
@@ -801,6 +879,7 @@ def execute_elevated(command: str, timeout: int = 120) -> Dict[str, Any]:
     Args:
         command: The PowerShell command to run with elevated permissions.
         timeout: Maximum seconds to wait before timing out (default: 120).
+        working_dir: Directory where the command should execute (default: None).
 
     Returns:
         Dictionary with stdout, stderr, return_code, execution_time_seconds, elevated, and timed_out.
@@ -815,6 +894,20 @@ def execute_elevated(command: str, timeout: int = 120) -> Dict[str, Any]:
             "timed_out": False,
             "execution_time_seconds": 0.0,
         }
+
+    # Validate working_dir if provided
+    resolved_cwd = None
+    if working_dir:
+        resolved_cwd = os.path.abspath(working_dir)
+        if not os.path.isdir(resolved_cwd):
+            return {
+                "stdout": "",
+                "stderr": f"Invalid working directory: {working_dir}",
+                "return_code": -1,
+                "elevated": False,
+                "timed_out": False,
+                "execution_time_seconds": 0.0,
+            }
 
     # 1. Enforce security guardrails first
     is_safe, error_msg = validate_command(command)
@@ -834,12 +927,13 @@ def execute_elevated(command: str, timeout: int = 120) -> Dict[str, Any]:
     if is_admin():
         try:
             # Use PowerShell directly without circular import
-            ps_script = f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}"
+            ps_script = f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & {{ {command} }}"
             enc = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
             proc = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
                 capture_output=True,
                 text=True,
+                cwd=resolved_cwd,
                 timeout=timeout,
             )
             return {
@@ -881,12 +975,16 @@ def execute_elevated(command: str, timeout: int = 120) -> Dict[str, Any]:
     # Safe PowerShell wrapper
     out_escaped = out_file.replace("'", "''")
     err_escaped = err_file.replace("'", "''")
+    cd_clause = ""
+    if resolved_cwd:
+        cd_escaped = resolved_cwd.replace("'", "''")
+        cd_clause = f"Set-Location -LiteralPath '{cd_escaped}'; "
 
     wrapper = f"""
 $ErrorActionPreference = 'Continue'
 try {{
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    {command} *>&1 | Out-File -FilePath '{out_escaped}' -Encoding UTF8
+    {cd_clause}& {{ {command} }} *>&1 | Out-File -FilePath '{out_escaped}' -Encoding UTF8
     $ec = $LASTEXITCODE
     if ($null -eq $ec) {{ $ec = 0 }}
 }} catch {{

@@ -1,7 +1,6 @@
 """Command and process execution tools for Windows MCP Server."""
 
 import os
-import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -56,7 +55,7 @@ def execute_powershell(
     # If elevation requested, route through UAC elevation executor directly
     # (execute_elevated validates the command internally; elevated procs cannot join unprivileged jobs)
     if elevate:
-        return execute_elevated(command, timeout=timeout)
+        return execute_elevated(command, timeout=timeout, working_dir=working_dir)
 
     # Guardrail: Check command safety
     is_safe, security_err = validate_command(command)
@@ -404,6 +403,7 @@ def kill_process(
 def execute_elevated_command(
     command: str,
     timeout: int = 120,
+    working_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a command with Administrator / Elevated privileges.
 
@@ -413,11 +413,12 @@ def execute_elevated_command(
     Args:
         command: PowerShell command to run with elevated permissions.
         timeout: Maximum seconds to wait before terminating (default: 120).
+        working_dir: Optional directory where command should execute.
 
     Returns:
         Dictionary with command output, return code, and elevation status.
     """
-    return execute_elevated(command=command, timeout=timeout)
+    return execute_elevated(command=command, timeout=timeout, working_dir=working_dir)
 
 
 def get_security_status() -> Dict[str, Any]:

@@ -5,7 +5,7 @@
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20%2F%20Server-0078D6.svg)](https://www.microsoft.com/windows)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/protocol-MCP%202024--11--05-purple.svg)](https://modelcontextprotocol.io/)
 [![Built with FastMCP](https://img.shields.io/badge/built%20with-FastMCP%20v4-brightgreen.svg)](https://github.com/jlowin/fastmcp)
-[![Tests: 66 Passing](https://img.shields.io/badge/tests-66%20passed-success.svg)](tests/)
+[![Tests: 84 Passing](https://img.shields.io/badge/tests-84%20passed-success.svg)](tests/)
 
 A secure, high-performance, strictly local **Model Context Protocol (MCP)** server built with **FastMCP** that connects AI assistants (**Antigravity, AGY CLI, Claude Desktop, Cursor, Cline, Roo Code**) to your local Windows environment.
 
@@ -163,7 +163,7 @@ Connecting an LLM to native OS execution requires defense-in-depth. Windows Cont
 
 ```powershell
 # Clone the repository
-git clone https://github.com/your-username/windows-mcp.git
+git clone https://github.com/subhasishsaha/windows-mcp.git
 cd windows-mcp
 
 # Create virtual environment
@@ -264,12 +264,13 @@ In Cline / Roo Code MCP Settings:
 | `MCP_STRICT_MODE` | `true` | When active, enforces strict validation and masks sensitive tokens in environment variables. |
 | `MCP_ALLOW_ELEVATION` | `true` | Allows tools to request administrative elevation via Windows UAC. Set to `false` to completely disable elevation. |
 | `MCP_AUDIT_LOG_FILE` | `security_audit.log` | Path for the security audit log file recording all allowed/blocked events. |
+| `MCP_AUTH_TOKEN` | (none) | Optional Bearer token for HTTP authentication. If set, incoming requests must include matching `Authorization: Bearer <token>`. |
 
 ---
 
 ## 🧪 Testing
 
-The repository includes a comprehensive test suite of 50 unit and integration tests covering security guardrails, command tools, filesystem protection, system monitoring, and server endpoints.
+The repository includes a comprehensive test suite of 84 unit and integration tests covering security guardrails, command tools, filesystem protection, system monitoring, and server endpoints.
 
 ```powershell
 # Run the complete test suite

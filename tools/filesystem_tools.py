@@ -2,10 +2,11 @@
 
 import fnmatch
 import os
+import re
 import shutil
 import stat
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 from security import validate_path_safety, validate_read_safety
 
 
@@ -17,7 +18,7 @@ def _format_time(timestamp: float) -> str:
         return ""
 
 
-def _remove_readonly(func, path, exc_info):
+def _remove_readonly(func: Any, path: str, exc_info: Any) -> None:
     """Error handler for shutil.rmtree on Windows to clear read-only file attributes."""
     try:
         os.chmod(path, stat.S_IWRITE)
@@ -43,7 +44,10 @@ def read_file(
     Returns:
         Dictionary containing file content, total line count, and range details.
     """
-    abs_path = os.path.abspath(path)
+    clean_path = path.strip().strip("\"'") if path else ""
+    if re.match(r"^[a-zA-Z]:$", clean_path):
+        clean_path = clean_path + "\\"
+    abs_path = os.path.abspath(clean_path)
 
     # Guardrail: Prevent unauthorized exfiltration of credential stores and sensitive files
     is_safe, sec_err = validate_read_safety(abs_path)
@@ -110,7 +114,10 @@ def write_file(
     if mode not in ("w", "a"):
         return {"success": False, "error": f"Invalid mode '{mode}'. Use 'w' or 'a'."}
 
-    abs_path = os.path.abspath(path)
+    clean_path = path.strip().strip("\"'") if path else ""
+    if re.match(r"^[a-zA-Z]:$", clean_path):
+        clean_path = clean_path + "\\"
+    abs_path = os.path.abspath(clean_path)
 
     # Guardrail: Prevent overwriting critical system files
     is_safe, path_err = validate_path_safety(abs_path, operation="write")
@@ -123,7 +130,8 @@ def write_file(
 
     try:
         with open(abs_path, mode, encoding=encoding) as f:
-            bytes_written = f.write(content)
+            f.write(content)
+        bytes_written = len(content.encode(encoding))
 
         return {
             "success": True,
@@ -293,7 +301,10 @@ def delete_file_or_dir(path: str, recursive: bool = False) -> Dict[str, Any]:
     Returns:
         Dictionary with deletion status and path.
     """
-    abs_path = os.path.abspath(path)
+    clean_path = path.strip().strip("\"'") if path else ""
+    if re.match(r"^[a-zA-Z]:$", clean_path):
+        clean_path = clean_path + "\\"
+    abs_path = os.path.abspath(clean_path)
 
     # Guardrail: Prevent deleting critical system roots and OS directories
     is_safe, path_err = validate_path_safety(abs_path, operation="delete")
@@ -347,13 +358,24 @@ def copy_or_move(
     if clean_action not in ("copy", "move"):
         return {"success": False, "error": f"Invalid action: '{action}'. Use 'copy' or 'move'."}
 
-    src_abs = os.path.abspath(source)
-    dst_abs = os.path.abspath(destination)
+    clean_src = source.strip().strip("\"'") if source else ""
+    if re.match(r"^[a-zA-Z]:$", clean_src):
+        clean_src = clean_src + "\\"
+    clean_dst = destination.strip().strip("\"'") if destination else ""
+    if re.match(r"^[a-zA-Z]:$", clean_dst):
+        clean_dst = clean_dst + "\\"
+    src_abs = os.path.abspath(clean_src)
+    dst_abs = os.path.abspath(clean_dst)
 
     # Guardrail: Validate destination for write/overwrite
     is_safe_dst, dst_err = validate_path_safety(dst_abs, operation="write")
     if not is_safe_dst:
         return {"success": False, "error": dst_err, "destination": dst_abs, "blocked_by_guardrail": True}
+
+    # Guardrail: Prevent credential exfiltration from sensitive source
+    is_safe_read, read_err = validate_read_safety(src_abs)
+    if not is_safe_read:
+        return {"success": False, "error": read_err or "Reading sensitive file blocked by security guardrails.", "source": src_abs, "blocked_by_guardrail": True}
 
     # Guardrail: If moving, validate source because moving deletes the original
     if clean_action == "move":

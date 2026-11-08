@@ -43,10 +43,15 @@ class TestDesktopTools(unittest.TestCase):
         self.assertIn("SECURITY POLICY VIOLATION", res2["error"])
 
     def test_launch_app_blocks_shells_and_scripts(self):
-        """Test that launch_app explicitly rejects shell interpreters and scripts to enforce sandbox containment."""
-        for target in ("cmd.exe", "cmd", "powershell.exe", "pwsh", "python.exe", "wscript.exe", "run.bat", "setup.ps1"):
+        """Test that launch_app explicitly rejects shell interpreters, LOLBINs, and dangerous scripts."""
+        blocked_targets = (
+            "cmd.exe", "cmd", "powershell.exe", "pwsh", "python.exe", "wscript.exe",
+            "mshta.exe", "mshta", "rundll32.exe", "rundll32", "regsvr32.exe", "regsvr32", "conhost.exe", "conhost",
+            "run.bat", "setup.ps1", "app.hta", "virus.pif", "saver.scr", "old.com",
+        )
+        for target in blocked_targets:
             res = launch_app(target)
-            self.assertFalse(res["success"])
+            self.assertFalse(res["success"], f"Target '{target}' was not blocked")
             self.assertTrue(res.get("blocked_by_guardrail"))
             self.assertIn("prohibited", res["error"])
 
@@ -75,6 +80,22 @@ class TestDesktopTools(unittest.TestCase):
         res = show_notification(title=title, message=message)
         self.assertIsInstance(res, dict)
         self.assertIn("success", res)
+
+    def test_show_notification_injection_prevention(self):
+        """Ensure command injection vectors in notification title/message cannot breakout or execute commands."""
+        test_canary = os.path.abspath("notification_canary.tmp")
+        if os.path.exists(test_canary):
+            os.remove(test_canary)
+        try:
+            injection_title = f'Alert $(New-Item -Path "{test_canary}" -ItemType File)'
+            injection_msg = 'Test\n"@\nWrite-Output "Broken"\n#\n`r`n'
+            res = show_notification(title=injection_title, message=injection_msg)
+            self.assertIsInstance(res, dict)
+            self.assertIn("success", res)
+            self.assertFalse(os.path.exists(test_canary), "Command injection succeeded in show_notification!")
+        finally:
+            if os.path.exists(test_canary):
+                os.remove(test_canary)
 
 
 if __name__ == "__main__":
