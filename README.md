@@ -5,7 +5,7 @@
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20%2F%20Server-0078D6.svg)](https://www.microsoft.com/windows)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/protocol-MCP%202024--11--05-purple.svg)](https://modelcontextprotocol.io/)
 [![Built with FastMCP](https://img.shields.io/badge/built%20with-FastMCP%20v4-brightgreen.svg)](https://github.com/jlowin/fastmcp)
-[![Tests: 50 Passing](https://img.shields.io/badge/tests-50%20passed-success.svg)](tests/)
+[![Tests: 64 Passing](https://img.shields.io/badge/tests-64%20passed-success.svg)](tests/)
 
 A secure, high-performance, strictly local **Model Context Protocol (MCP)** server built with **FastMCP** that connects AI assistants (**Antigravity, AGY CLI, Claude Desktop, Cursor, Cline, Roo Code**) to your local Windows environment.
 
@@ -94,6 +94,14 @@ Connecting an LLM to native OS execution requires defense-in-depth. Windows Cont
 ### 8. Controlled Elevation via Windows UAC
 - Commands requesting administrative privileges trigger standard Windows User Account Control (UAC) prompts (`Start-Process -Verb RunAs`), ensuring physical user awareness.
 - Elevation policy is configurable via `MCP_ALLOW_ELEVATION`.
+
+### 9. Kernel-Enforced Windows Job Object Sandboxing
+- Beyond static command/code analysis, non-elevated command execution (`execute_powershell`, `execute_cmd`, `execute_python`) runs inside an isolated **Win32 Job Object** ([`sandbox.py`](sandbox.py)) by default (`use_sandbox=True`).
+- **Process Memory Limits**: Enforces hard commit caps (default: 512 MB per process, 1024 MB cumulative job memory) to prevent memory-exhaustion DoS.
+- **Fork-Bomb & Quota Mitigation**: Restricts the maximum number of concurrent active processes (default: 16 processes) via `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`. Spawning runaway child processes triggers kernel quota limits (`WinError 1816`).
+- **Atomic Hierarchy Termination**: Timeouts and terminations execute `TerminateJobObject`, instantly killing every child and descendant process in the kernel with zero possibility of orphaned background processes or lingering reverse shells surviving.
+- **UI & System Isolation**: Imposes Win32 UI restrictions (`JOB_OBJECT_UILIMIT_HANDLES`, `JOB_OBJECT_UILIMIT_EXITWINDOWS`, `JOB_OBJECT_UILIMIT_DESKTOP`, `JOB_OBJECT_UILIMIT_GLOBALATOMS`) preventing child processes from injecting input into external windows, manipulating global atoms, switching desktops, or initiating system shutdown.
+- **Resource Observability**: Reports peak process memory, total spawned processes, and CPU user/kernel seconds directly in the execution results.
 
 ---
 
